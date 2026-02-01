@@ -230,6 +230,42 @@ See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for common issues:
 - No data in target table
 - S3/Postgres integration issues
 
+## Snowflake Documentation
+
+### Core Technologies
+
+| Technology | Description | Documentation |
+|------------|-------------|---------------|
+| **Snowpark Container Services** | Run containers in Snowflake | [SPCS Overview](https://docs.snowflake.com/en/developer-guide/snowpark-container-services/overview) |
+| **Snowpipe Streaming** | Real-time data ingestion (<5 sec latency) | [Snowpipe Streaming](https://docs.snowflake.com/en/user-guide/data-load-snowpipe-streaming-overview) |
+| **Image Repository** | Store Docker images in Snowflake | [Image Repository](https://docs.snowflake.com/en/developer-guide/snowpark-container-services/working-with-registry-repository) |
+| **Compute Pool** | SPCS compute resources | [Compute Pool](https://docs.snowflake.com/en/developer-guide/snowpark-container-services/working-with-compute-pool) |
+
+### Data Pipeline Components
+
+| Component | Use Case | Documentation |
+|-----------|----------|---------------|
+| **External Stages** | S3/Azure/GCS integration | [External Stages](https://docs.snowflake.com/en/user-guide/data-load-s3-create-stage) |
+| **Storage Integration** | Secure cloud storage access | [Storage Integration](https://docs.snowflake.com/en/sql-reference/sql/create-storage-integration) |
+| **Snowpipe** | Auto-ingest from stages | [Snowpipe](https://docs.snowflake.com/en/user-guide/data-load-snowpipe-intro) |
+| **Tasks** | Scheduled SQL execution | [Tasks](https://docs.snowflake.com/en/user-guide/tasks-intro) |
+| **Dynamic Tables** | Declarative data pipelines | [Dynamic Tables](https://docs.snowflake.com/en/user-guide/dynamic-tables-about) |
+
+### Security & Access
+
+| Topic | Documentation |
+|-------|---------------|
+| **Secrets** | [CREATE SECRET](https://docs.snowflake.com/en/sql-reference/sql/create-secret) |
+| **External Access Integration** | [External Network Access](https://docs.snowflake.com/en/developer-guide/external-network-access/external-network-access-overview) |
+| **Service Roles** | [SPCS Service Roles](https://docs.snowflake.com/en/developer-guide/snowpark-container-services/additional-considerations-services-jobs#service-roles) |
+
+### Terraform
+
+| Resource | Documentation |
+|----------|---------------|
+| **Snowflake Provider** | [Terraform Provider](https://registry.terraform.io/providers/Snowflake-Labs/snowflake/latest/docs) |
+| **Compute Pool Resource** | [snowflake_compute_pool](https://registry.terraform.io/providers/Snowflake-Labs/snowflake/latest/docs/resources/compute_pool) |
+
 ## License
 
 Internal Snowflake use only. Contact the Flux team for licensing questions.

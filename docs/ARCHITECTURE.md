@@ -1,5 +1,7 @@
 # Architecture
 
+This document describes the architecture of Flux Data Forge running on [Snowpark Container Services (SPCS)](https://docs.snowflake.com/en/developer-guide/snowpark-container-services/overview).
+
 ## System Overview
 
 ```mermaid
@@ -93,6 +95,8 @@ flowchart TB
 
 ## Streaming Architecture (Snowpipe SDK)
 
+The real-time streaming capability uses [Snowpipe Streaming SDK](https://docs.snowflake.com/en/user-guide/data-load-snowpipe-streaming-overview) for sub-5-second latency ingestion.
+
 ```mermaid
 sequenceDiagram
     participant UI as Web UI
@@ -117,6 +121,8 @@ sequenceDiagram
 ```
 
 ## Medallion Architecture (S3 Flow)
+
+This flow uses [External Stages](https://docs.snowflake.com/en/user-guide/data-load-s3-create-stage) with [Snowpipe auto-ingest](https://docs.snowflake.com/en/user-guide/data-load-snowpipe-auto-s3) and [Dynamic Tables](https://docs.snowflake.com/en/user-guide/dynamic-tables-about) for transformation.
 
 ```mermaid
 flowchart LR

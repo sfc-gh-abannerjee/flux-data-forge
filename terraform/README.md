@@ -2,15 +2,17 @@
 
 This Terraform module provisions all Snowflake infrastructure required for deploying Flux Data Forge as a Snowpark Container Service.
 
+> **📚 Documentation**: [Snowflake Terraform Provider](https://registry.terraform.io/providers/Snowflake-Labs/snowflake/latest/docs)
+
 ## Resources Created
 
-- **Database** (optional) - Container for all objects
-- **Schema** (optional) - Namespace for objects
-- **Warehouse** (optional) - Compute for queries
-- **Image Repository** - Stores Docker images
-- **Compute Pool** (optional) - SPCS compute resources
-- **Target Table** - Landing table for AMI data
-- **Service Role** (optional) - Dedicated role with minimal privileges
+- **Database** (optional) - Container for all objects | [CREATE DATABASE](https://docs.snowflake.com/en/sql-reference/sql/create-database)
+- **Schema** (optional) - Namespace for objects | [CREATE SCHEMA](https://docs.snowflake.com/en/sql-reference/sql/create-schema)
+- **Warehouse** (optional) - Compute for queries | [CREATE WAREHOUSE](https://docs.snowflake.com/en/sql-reference/sql/create-warehouse)
+- **Image Repository** - Stores Docker images | [Image Repository](https://docs.snowflake.com/en/developer-guide/snowpark-container-services/working-with-registry-repository)
+- **Compute Pool** (optional) - SPCS compute resources | [Compute Pool](https://docs.snowflake.com/en/developer-guide/snowpark-container-services/working-with-compute-pool)
+- **Target Table** - Landing table for AMI data | [CREATE TABLE](https://docs.snowflake.com/en/sql-reference/sql/create-table)
+- **Service Role** (optional) - Dedicated role with minimal privileges | [CREATE ROLE](https://docs.snowflake.com/en/sql-reference/sql/create-role)
 
 ## Prerequisites
 

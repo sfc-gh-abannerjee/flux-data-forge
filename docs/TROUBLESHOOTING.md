@@ -266,7 +266,24 @@ If you're still stuck:
 2. **Check Snowflake documentation:**
    - [SPCS Overview](https://docs.snowflake.com/en/developer-guide/snowpark-container-services/overview)
    - [Troubleshooting SPCS](https://docs.snowflake.com/en/developer-guide/snowpark-container-services/troubleshooting)
+   - [Service Logs](https://docs.snowflake.com/en/developer-guide/snowpark-container-services/working-with-services#getting-the-status-of-a-service)
+   - [Compute Pools](https://docs.snowflake.com/en/developer-guide/snowpark-container-services/working-with-compute-pool)
 
 3. **Contact support:**
    - Open an issue in this repository with diagnostic output
    - Include: service logs, compute pool status, and steps to reproduce
+
+---
+
+## Quick Reference: Snowflake Documentation
+
+| Topic | Link |
+|-------|------|
+| SPCS Overview | [docs.snowflake.com/.../overview](https://docs.snowflake.com/en/developer-guide/snowpark-container-services/overview) |
+| Image Registry | [docs.snowflake.com/.../working-with-registry-repository](https://docs.snowflake.com/en/developer-guide/snowpark-container-services/working-with-registry-repository) |
+| Compute Pools | [docs.snowflake.com/.../working-with-compute-pool](https://docs.snowflake.com/en/developer-guide/snowpark-container-services/working-with-compute-pool) |
+| Service Specification | [docs.snowflake.com/.../specification-reference](https://docs.snowflake.com/en/developer-guide/snowpark-container-services/specification-reference) |
+| External Access | [docs.snowflake.com/.../external-network-access-overview](https://docs.snowflake.com/en/developer-guide/external-network-access/external-network-access-overview) |
+| Secrets | [docs.snowflake.com/.../create-secret](https://docs.snowflake.com/en/sql-reference/sql/create-secret) |
+| Snowpipe Streaming | [docs.snowflake.com/.../data-load-snowpipe-streaming-overview](https://docs.snowflake.com/en/user-guide/data-load-snowpipe-streaming-overview) |
+| Storage Integration | [docs.snowflake.com/.../create-storage-integration](https://docs.snowflake.com/en/sql-reference/sql/create-storage-integration) |
