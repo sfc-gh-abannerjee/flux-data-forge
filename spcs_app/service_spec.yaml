@@ -1,0 +1,52 @@
+spec:
+  containers:
+    - name: flux-data-forge
+      image: /<YOUR_DATABASE>/<YOUR_SCHEMA>/<YOUR_IMAGE_REPO>/flux_data_forge:latest
+      env:
+        # Snowflake Configuration (auto-populated by SPCS)
+        # SNOWFLAKE_ACCOUNT: set automatically by SPCS
+        # SNOWFLAKE_HOST: set automatically by SPCS
+        SNOWFLAKE_DATABASE: <YOUR_DATABASE>
+        SNOWFLAKE_SCHEMA: <YOUR_SCHEMA>
+        SNOWFLAKE_ROLE: <YOUR_ROLE>
+        SNOWFLAKE_WAREHOUSE: <YOUR_WAREHOUSE>
+        
+        # PostgreSQL Configuration (optional - for Managed Postgres dual-write)
+        # POSTGRES_HOST: <your-postgres-host>.snowflake.app
+        # POSTGRES_DATABASE: postgres
+        # POSTGRES_USER: application
+        # POSTGRES_PORT: "5432"
+        
+        # AMI Streaming Configuration
+        AMI_TABLE: AMI_STREAMING_READINGS
+        SERVICE_AREA: HOUSTON_METRO
+        
+        # AWS Configuration (optional - for S3 External Stage streaming)
+        # AWS_REGION: us-west-2
+        # AWS_ROLE_ARN: arn:aws:iam::<YOUR_AWS_ACCOUNT>:role/<YOUR_ROLE_NAME>
+      
+      # Secrets (configure in Snowflake before deployment)
+      # secrets:
+      #   - snowflakeSecret: <YOUR_DATABASE>.<YOUR_SCHEMA>.STREAMING_KEY
+      #     directoryPath: '/usr/local/creds'
+      #   - snowflakeSecret: <YOUR_DATABASE>.<YOUR_SCHEMA>.POSTGRES_CREDENTIALS
+      #     secretKeyRef: password
+      #     envVarName: POSTGRES_PASSWORD
+      #   - snowflakeSecret: <YOUR_DATABASE>.<YOUR_SCHEMA>.AWS_S3_CREDENTIALS
+      #     secretKeyRef: username
+      #     envVarName: AWS_ACCESS_KEY_ID
+      #   - snowflakeSecret: <YOUR_DATABASE>.<YOUR_SCHEMA>.AWS_S3_CREDENTIALS
+      #     secretKeyRef: password
+      #     envVarName: AWS_SECRET_ACCESS_KEY
+      
+      resources:
+        requests:
+          cpu: 1
+          memory: 2Gi
+        limits:
+          cpu: 2
+          memory: 4Gi
+  endpoints:
+    - name: app
+      port: 8080
+      public: true
