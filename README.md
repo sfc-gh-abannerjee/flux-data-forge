@@ -1,6 +1,10 @@
 # Flux Data Forge
 
+[![CI/CD](https://github.com/sfc-gh-abannerjee/flux-data-forge/actions/workflows/ci.yml/badge.svg)](https://github.com/sfc-gh-abannerjee/flux-data-forge/actions/workflows/ci.yml)
+
 Synthetic AMI (Advanced Metering Infrastructure) data generation platform for Snowflake demos and POCs. Generates realistic smart meter readings at configurable scale (67K to 350M+ rows) with real-time streaming capabilities.
+
+> **Quick Deploy**: Run `./scripts/quick_deploy.sh` for guided interactive deployment!
 
 ## Features
 
@@ -189,6 +193,9 @@ flux-data-forge/
 ├── README.md               # This file
 ├── .env.example            # Environment variable template
 ├── .gitignore              # Git ignore rules
+├── .github/
+│   └── workflows/
+│       └── ci.yml          # CI/CD pipeline (lint, test, build, deploy)
 ├── spcs_app/
 │   ├── fastapi_app.py      # Main FastAPI application (12K lines)
 │   ├── snowpipe_streaming_impl.py  # Snowpipe Streaming SDK wrapper
@@ -197,7 +204,19 @@ flux-data-forge/
 │   ├── service_spec.yaml   # SPCS service specification template
 │   ├── deploy_spcs.sql     # Deployment script with pre-flight checks
 │   └── build_and_push.sh   # Docker build automation
+├── scripts/
+│   └── quick_deploy.sh     # Interactive one-click deployment
+├── terraform/
+│   ├── main.tf             # Infrastructure resources
+│   ├── variables.tf        # Input variables
+│   ├── outputs.tf          # Output values
+│   ├── terraform.tfvars.example  # Example configuration
+│   └── README.md           # Terraform usage guide
+├── tests/
+│   ├── smoke_test.py       # Quick validation tests
+│   └── test_unit.py        # Unit tests (pytest)
 └── docs/
+    ├── ARCHITECTURE.md     # System diagrams (Mermaid)
     └── TROUBLESHOOTING.md  # Common issues and solutions
 ```
 

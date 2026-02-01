@@ -1,0 +1,69 @@
+# =============================================================================
+# Flux Data Forge - Example Terraform Configuration
+# =============================================================================
+# Copy this file to terraform.tfvars and customize for your environment.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# DATABASE & SCHEMA
+# -----------------------------------------------------------------------------
+# Set to true if you want Terraform to create these, false to use existing
+
+database_name   = "MY_DATABASE"
+create_database = false
+
+schema_name   = "FLUX_APP"
+create_schema = true
+
+# -----------------------------------------------------------------------------
+# WAREHOUSE
+# -----------------------------------------------------------------------------
+# Set to true if you want Terraform to create a new warehouse
+
+warehouse_name   = "MY_WAREHOUSE"
+create_warehouse = false
+# warehouse_size = "XSMALL"  # Only used if create_warehouse = true
+
+# -----------------------------------------------------------------------------
+# COMPUTE POOL
+# -----------------------------------------------------------------------------
+# SPCS compute pool - set to true to create, false to use existing
+
+compute_pool_name   = "FLUX_COMPUTE_POOL"
+create_compute_pool = true
+
+# Compute pool sizing (only used if create_compute_pool = true)
+# compute_pool_instance_family = "CPU_X64_S"  # XS, S, M, L available
+# compute_pool_min_nodes       = 1
+# compute_pool_max_nodes       = 2
+# compute_pool_auto_suspend_secs = 300
+
+# -----------------------------------------------------------------------------
+# IMAGE REPOSITORY
+# -----------------------------------------------------------------------------
+# Always created - stores the Docker images
+
+image_repository_name = "FLUX_DATA_FORGE_REPO"
+
+# -----------------------------------------------------------------------------
+# TARGET TABLE
+# -----------------------------------------------------------------------------
+# Landing table for generated AMI data
+
+target_table_name = "AMI_STREAMING_READINGS"
+
+# -----------------------------------------------------------------------------
+# SERVICE ROLE (Optional)
+# -----------------------------------------------------------------------------
+# Create a dedicated role with minimal privileges
+
+create_service_role = false
+# service_role_name = "FLUX_DATA_FORGE_ROLE"
+
+# -----------------------------------------------------------------------------
+# SERVICE CONFIGURATION
+# -----------------------------------------------------------------------------
+# Used in output SQL generation
+
+service_name      = "FLUX_DATA_FORGE_SERVICE"
+service_image_tag = "latest"

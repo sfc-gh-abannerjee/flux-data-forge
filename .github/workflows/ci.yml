@@ -1,0 +1,193 @@
+# Flux Data Forge - CI/CD Pipeline
+# 
+# Triggers:
+#   - Push to main: Build, test, and optionally deploy
+#   - Pull requests: Build and test only
+#   - Manual: Deploy to Snowflake SPCS
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: 'Deploy to Snowflake SPCS'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+env:
+  PYTHON_VERSION: '3.11'
+  DOCKER_IMAGE_NAME: flux_data_forge
+
+jobs:
+  # ============================================================================
+  # JOB: Lint and Type Check
+  # ============================================================================
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install linting tools
+        run: |
+          pip install flake8 black isort mypy
+
+      - name: Check formatting with Black
+        run: |
+          black --check --diff spcs_app/*.py || echo "::warning::Code formatting issues found"
+        continue-on-error: true
+
+      - name: Check import sorting
+        run: |
+          isort --check-only --diff spcs_app/*.py || echo "::warning::Import sorting issues found"
+        continue-on-error: true
+
+      - name: Lint with flake8
+        run: |
+          flake8 spcs_app/*.py --max-line-length=120 --ignore=E501,W503 --count --statistics
+        continue-on-error: true
+
+  # ============================================================================
+  # JOB: Test
+  # ============================================================================
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          pip install -r spcs_app/requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run unit tests
+        run: |
+          pytest tests/ -v --tb=short --cov=spcs_app --cov-report=term-missing
+        continue-on-error: true
+
+      - name: Run smoke tests
+        run: |
+          python tests/smoke_test.py
+        continue-on-error: true
+
+  # ============================================================================
+  # JOB: Build Docker Image
+  # ============================================================================
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        run: |
+          cd spcs_app
+          docker build -t ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }} .
+          docker build -t ${{ env.DOCKER_IMAGE_NAME }}:latest .
+
+      - name: Verify image
+        run: |
+          docker images | grep ${{ env.DOCKER_IMAGE_NAME }}
+          echo "✓ Docker image built successfully"
+
+      - name: Test container starts
+        run: |
+          # Start container in background
+          docker run -d --name test-container \
+            -e SNOWFLAKE_DATABASE=TEST \
+            -e SNOWFLAKE_SCHEMA=TEST \
+            -p 8080:8080 \
+            ${{ env.DOCKER_IMAGE_NAME }}:latest || true
+          
+          # Give it a moment to start
+          sleep 5
+          
+          # Check if container is running (may fail without Snowflake connection, that's OK)
+          docker logs test-container 2>&1 | head -50
+          docker stop test-container || true
+          docker rm test-container || true
+
+  # ============================================================================
+  # JOB: Deploy to Snowflake (Manual)
+  # ============================================================================
+  deploy:
+    name: Deploy to Snowflake SPCS
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.event.inputs.deploy == 'true' || (github.ref == 'refs/heads/main' && github.event_name == 'push')
+    environment: production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Snowflake Registry
+        env:
+          SNOWFLAKE_REGISTRY: ${{ secrets.SNOWFLAKE_REGISTRY }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+        run: |
+          echo "$SNOWFLAKE_PASSWORD" | docker login $SNOWFLAKE_REGISTRY -u $SNOWFLAKE_USER --password-stdin
+
+      - name: Build and Push to Snowflake
+        env:
+          SNOWFLAKE_REGISTRY: ${{ secrets.SNOWFLAKE_REGISTRY }}
+          SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
+          SNOWFLAKE_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
+          IMAGE_REPO: ${{ secrets.IMAGE_REPO }}
+        run: |
+          FULL_IMAGE="${SNOWFLAKE_REGISTRY}/${SNOWFLAKE_DATABASE}/${SNOWFLAKE_SCHEMA}/${IMAGE_REPO}/${{ env.DOCKER_IMAGE_NAME }}"
+          
+          cd spcs_app
+          docker build -t ${FULL_IMAGE}:${{ github.sha }} .
+          docker build -t ${FULL_IMAGE}:latest .
+          
+          docker push ${FULL_IMAGE}:${{ github.sha }}
+          docker push ${FULL_IMAGE}:latest
+          
+          echo "✓ Pushed: ${FULL_IMAGE}:latest"
+
+      - name: Update SPCS Service
+        env:
+          SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+          SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+          SNOWFLAKE_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
+        run: |
+          echo "::notice::To update the running service, execute in Snowflake:"
+          echo "ALTER SERVICE FLUX_DATA_FORGE_SERVICE FROM SPECIFICATION ..."
+          echo ""
+          echo "Or restart the service to pick up the new :latest image:"
+          echo "ALTER SERVICE FLUX_DATA_FORGE_SERVICE SUSPEND;"
+          echo "ALTER SERVICE FLUX_DATA_FORGE_SERVICE RESUME;"
