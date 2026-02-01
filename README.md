@@ -46,7 +46,28 @@ Synthetic AMI (Advanced Metering Infrastructure) data generation platform for Sn
 
 ## Quick Start
 
-### 1. Clone and Configure
+### Option A: Use Prebuilt Image (Recommended)
+
+Pull the prebuilt image from GitHub Container Registry:
+
+```bash
+# Pull latest image
+docker pull ghcr.io/sfc-gh-abannerjee/flux-data-forge:latest
+
+# Tag for your Snowflake registry
+docker tag ghcr.io/sfc-gh-abannerjee/flux-data-forge:latest \
+  <YOUR_ORG>-<YOUR_ACCOUNT>.registry.snowflakecomputing.com/<DB>/<SCHEMA>/<REPO>/flux_data_forge:latest
+
+# Login and push to Snowflake
+docker login <YOUR_ORG>-<YOUR_ACCOUNT>.registry.snowflakecomputing.com
+docker push <YOUR_ORG>-<YOUR_ACCOUNT>.registry.snowflakecomputing.com/<DB>/<SCHEMA>/<REPO>/flux_data_forge:latest
+```
+
+Then skip to [Step 3: Deploy to SPCS](#3-deploy-to-spcs).
+
+### Option B: Build from Source
+
+#### 1. Clone and Configure
 
 ```bash
 git clone https://github.com/sfc-gh-abannerjee/flux-data-forge.git
@@ -63,7 +84,7 @@ Update deployment files in `spcs_app/`:
 - `build_and_push.sh` - Set your registry URL
 - `deploy_spcs.sql` - Set configuration variables (database, schema, compute pool)
 
-### 2. Build and Push Docker Image
+#### 2. Build and Push Docker Image
 
 ```bash
 cd spcs_app
@@ -217,6 +238,7 @@ flux-data-forge/
 │   └── test_unit.py        # Unit tests (pytest)
 └── docs/
     ├── ARCHITECTURE.md     # System diagrams (Mermaid)
+    ├── SAMPLE_QUERIES.md   # Deployment validation queries
     └── TROUBLESHOOTING.md  # Common issues and solutions
 ```
 
@@ -268,7 +290,7 @@ See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for common issues:
 
 ## License
 
-Internal Snowflake use only. Contact the Flux team for licensing questions.
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
 ## Support
 
