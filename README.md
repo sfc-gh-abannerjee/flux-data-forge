@@ -1,8 +1,11 @@
 # Flux Data Forge
 
-[![CI/CD](https://github.com/sfc-gh-abannerjee/flux-data-forge/actions/workflows/ci.yml/badge.svg)](https://github.com/sfc-gh-abannerjee/flux-data-forge/actions/workflows/ci.yml)
+[![Snowflake](https://img.shields.io/badge/Snowflake-29B5E8?logo=snowflake&logoColor=white)](https://www.snowflake.com)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 Synthetic AMI (Advanced Metering Infrastructure) data generation platform for Snowflake demos and POCs. Generates realistic smart meter readings at configurable scale (67K to 350M+ rows) with real-time streaming capabilities.
+
+---
 
 > **Quick Deploy**: Run `./scripts/quick_deploy.sh` for guided interactive deployment!
 
@@ -212,6 +215,8 @@ The generated AMI data includes:
 ```
 flux-data-forge/
 ├── README.md               # This file
+├── LICENSE                 # Apache 2.0 license
+├── SECURITY.md             # Security model and RBAC
 ├── .env.example            # Environment variable template
 ├── .gitignore              # Git ignore rules
 ├── .github/
