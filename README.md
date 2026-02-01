@@ -7,6 +7,13 @@ Synthetic AMI (Advanced Metering Infrastructure) data generation platform for Sn
 
 ---
 
+<p align="center">
+  <img width="49%" alt="Flux Data Forge - Generation Interface" src="assets/flux_data_forge_generate_1.png" />
+  <img width="49%" alt="Flux Data Forge - Data Preview" src="assets/flux_data_forge_generate_2.png" />
+</p>
+
+---
+
 > **Quick Deploy**: Run `./scripts/quick_deploy.sh` for guided interactive deployment!
 
 ## Features
