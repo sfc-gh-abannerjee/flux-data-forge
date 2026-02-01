@@ -4,37 +4,95 @@
 -- This script creates the necessary Snowflake objects for deploying
 -- Flux Data Forge as a Snowpark Container Service.
 --
--- Prerequisites:
--- 1. ACCOUNTADMIN role (or equivalent permissions)
--- 2. Docker image pushed to Snowflake Image Registry
--- 3. Compute pool created (or use existing)
+-- INSTRUCTIONS:
+-- 1. Update the configuration variables below (Section 0)
+-- 2. Run the PRE-FLIGHT CHECKS section first to validate your environment
+-- 3. If all checks pass, run the remaining sections in order
 -- =============================================================================
 
--- Configuration variables - UPDATE THESE
-SET database_name = '<YOUR_DATABASE>';
-SET schema_name = '<YOUR_SCHEMA>';
-SET warehouse_name = '<YOUR_WAREHOUSE>';
-SET compute_pool_name = '<YOUR_COMPUTE_POOL>';
-SET image_repo_name = '<YOUR_IMAGE_REPO>';
-SET service_name = 'FLUX_DATA_FORGE_SERVICE';
+-- =============================================================================
+-- 0. CONFIGURATION - UPDATE THESE VALUES
+-- =============================================================================
+SET database_name = 'MY_DATABASE';        -- Your target database
+SET schema_name = 'MY_SCHEMA';            -- Your target schema
+SET warehouse_name = 'MY_WAREHOUSE';      -- Warehouse for queries
+SET compute_pool_name = 'MY_COMPUTE_POOL'; -- SPCS compute pool
+SET image_repo_name = 'FLUX_DATA_FORGE_REPO';  -- Image repository name
+SET service_name = 'FLUX_DATA_FORGE_SERVICE';  -- Service name
 
--- Use the target database and schema
+-- =============================================================================
+-- 1. PRE-FLIGHT CHECKS - Run these FIRST to validate your environment
+-- =============================================================================
+-- These queries help identify issues before deployment fails.
+
+-- Check 1: Verify current role has necessary permissions
+SELECT 
+    '✓ Current Role' as CHECK_NAME,
+    CURRENT_ROLE() as VALUE,
+    'Ensure this role can create services, compute pools, and repositories' as NOTE;
+
+-- Check 2: Verify account has SPCS enabled
+SELECT 
+    '✓ SPCS Enabled' as CHECK_NAME,
+    CASE WHEN SYSTEM$BEHAVIOR_CHANGE_BUNDLE_STATUS('2024_08') IS NOT NULL 
+         THEN 'Yes' ELSE 'Check with support' END as VALUE,
+    'SPCS requires specific account enablement' as NOTE;
+
+-- Check 3: List existing compute pools (at least one must exist or be created)
+SHOW COMPUTE POOLS;
+
+-- Check 4: Verify warehouse exists and is accessible
+SHOW WAREHOUSES LIKE $warehouse_name;
+
+-- Check 5: Check if database/schema exist
+SHOW DATABASES LIKE $database_name;
+SHOW SCHEMAS LIKE $schema_name IN DATABASE IDENTIFIER($database_name);
+
+-- Check 6: Verify you can use the target database/schema
 USE DATABASE IDENTIFIER($database_name);
 USE SCHEMA IDENTIFIER($schema_name);
+USE WAREHOUSE IDENTIFIER($warehouse_name);
+
+-- Check 7: List existing image repositories (for reference)
+SHOW IMAGE REPOSITORIES;
 
 -- =============================================================================
--- 1. CREATE IMAGE REPOSITORY (if not exists)
+-- PRE-FLIGHT SUMMARY
+-- =============================================================================
+-- If you see errors above, fix them before proceeding:
+--
+-- ERROR: "Database does not exist"
+--   → CREATE DATABASE <your_database>;
+--
+-- ERROR: "Schema does not exist"  
+--   → CREATE SCHEMA <your_database>.<your_schema>;
+--
+-- ERROR: "Warehouse does not exist"
+--   → CREATE WAREHOUSE <your_warehouse> WAREHOUSE_SIZE = 'XSMALL';
+--
+-- ERROR: "Compute pool does not exist" (when creating service)
+--   → Uncomment and run Section 2 below to create one
+--
+-- ERROR: "Insufficient privileges"
+--   → USE ROLE ACCOUNTADMIN; or request privileges from admin
+-- =============================================================================
+
+-- =============================================================================
+-- 2. CREATE IMAGE REPOSITORY
 -- =============================================================================
 CREATE IMAGE REPOSITORY IF NOT EXISTS IDENTIFIER($image_repo_name)
     COMMENT = 'Image repository for Flux Data Forge';
 
--- Show repository URL for docker push
+-- Get the repository URL - you'll need this for docker push
+-- Format: <org>-<account>.registry.snowflakecomputing.com/<db>/<schema>/<repo>
 SHOW IMAGE REPOSITORIES LIKE $image_repo_name;
 
 -- =============================================================================
--- 2. CREATE COMPUTE POOL (if not exists)
+-- 3. CREATE COMPUTE POOL (if needed)
 -- =============================================================================
--- Uncomment and modify if you need to create a compute pool
+-- Uncomment the block below if you need to create a new compute pool.
+-- Skip if using an existing pool.
+
 /*
 CREATE COMPUTE POOL IF NOT EXISTS IDENTIFIER($compute_pool_name)
     MIN_NODES = 1
@@ -43,10 +101,13 @@ CREATE COMPUTE POOL IF NOT EXISTS IDENTIFIER($compute_pool_name)
     AUTO_RESUME = TRUE
     AUTO_SUSPEND_SECS = 300
     COMMENT = 'Compute pool for Flux Data Forge';
+
+-- Wait for compute pool to be ready (ACTIVE or IDLE state)
+DESCRIBE COMPUTE POOL IDENTIFIER($compute_pool_name);
 */
 
 -- =============================================================================
--- 3. CREATE STREAMING TABLE (landing zone for AMI data)
+-- 4. CREATE TARGET TABLE (landing zone for AMI data)
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS AMI_STREAMING_READINGS (
     -- Core AMI fields
@@ -85,34 +146,88 @@ CHANGE_TRACKING = ON
 COMMENT = 'Streaming landing table for AMI data from Flux Data Forge';
 
 -- =============================================================================
--- 4. CREATE SPCS SERVICE
+-- 5. CREATE SPCS SERVICE
 -- =============================================================================
--- Drop existing service if updating
--- DROP SERVICE IF EXISTS IDENTIFIER($service_name);
+-- IMPORTANT: Before running this, ensure:
+-- 1. Docker image is pushed to the repository (run build_and_push.sh)
+-- 2. service_spec.yaml is uploaded or inline spec is used
+-- 3. Compute pool exists and is in ACTIVE or IDLE state
 
+-- Option A: Create from uploaded spec file (if using Snowflake stage)
+-- CREATE SERVICE IF NOT EXISTS IDENTIFIER($service_name)
+--     IN COMPUTE POOL IDENTIFIER($compute_pool_name)
+--     FROM @my_stage/service_spec.yaml
+--     EXTERNAL_ACCESS_INTEGRATIONS = ()
+--     COMMENT = 'Flux Data Forge - Synthetic AMI Data Generation Service';
+
+-- Option B: Create with inline specification
 CREATE SERVICE IF NOT EXISTS IDENTIFIER($service_name)
     IN COMPUTE POOL IDENTIFIER($compute_pool_name)
-    FROM SPECIFICATION_FILE = 'service_spec.yaml'
-    EXTERNAL_ACCESS_INTEGRATIONS = ()  -- Add if external network access needed
+    FROM SPECIFICATION $$
+spec:
+  containers:
+    - name: flux-data-forge
+      image: /MY_DATABASE/MY_SCHEMA/FLUX_DATA_FORGE_REPO/flux_data_forge:latest
+      env:
+        SNOWFLAKE_DATABASE: MY_DATABASE
+        SNOWFLAKE_SCHEMA: MY_SCHEMA
+        SNOWFLAKE_WAREHOUSE: MY_WAREHOUSE
+        SNOWFLAKE_ROLE: SYSADMIN
+        AMI_TABLE: AMI_STREAMING_READINGS
+        SERVICE_AREA: HOUSTON_METRO
+      resources:
+        requests:
+          cpu: 1
+          memory: 2Gi
+        limits:
+          cpu: 2
+          memory: 4Gi
+  endpoints:
+    - name: app
+      port: 8080
+      public: true
+$$
+    EXTERNAL_ACCESS_INTEGRATIONS = ()
     COMMENT = 'Flux Data Forge - Synthetic AMI Data Generation Service';
 
 -- =============================================================================
--- 5. GRANT ACCESS TO SERVICE ENDPOINT
+-- 6. VERIFY DEPLOYMENT
 -- =============================================================================
--- Grant access to specific roles as needed
--- GRANT USAGE ON SERVICE IDENTIFIER($service_name) TO ROLE <YOUR_ROLE>;
 
--- =============================================================================
--- 6. CHECK SERVICE STATUS
--- =============================================================================
-DESCRIBE SERVICE IDENTIFIER($service_name);
+-- Check service status (should be READY)
 SELECT SYSTEM$GET_SERVICE_STATUS($service_name);
-CALL SYSTEM$GET_SERVICE_LOGS($service_name, '0', 'flux-data-forge', 100);
+
+-- Describe service details
+DESCRIBE SERVICE IDENTIFIER($service_name);
+
+-- View service logs (useful for debugging)
+-- CALL SYSTEM$GET_SERVICE_LOGS($service_name, '0', 'flux-data-forge', 100);
 
 -- =============================================================================
--- 7. GET SERVICE ENDPOINT URL
+-- 7. GET SERVICE URL
 -- =============================================================================
+-- The ingress_url is your application URL
 SHOW ENDPOINTS IN SERVICE IDENTIFIER($service_name);
 
--- The service URL will be shown in the INGRESS_URL column
--- Format: https://<random>-<org>-<account>.snowflakecomputing.app
+-- =============================================================================
+-- 8. POST-DEPLOYMENT VALIDATION
+-- =============================================================================
+-- After getting the URL, verify the service is healthy:
+-- 1. Open the ingress_url in your browser
+-- 2. You should see the Flux Data Forge UI
+-- 3. Try generating a small batch (Quick Demo preset)
+-- 4. Check the target table for data:
+
+SELECT COUNT(*) as ROW_COUNT, 
+       MIN(READING_TIMESTAMP) as EARLIEST,
+       MAX(READING_TIMESTAMP) as LATEST
+FROM AMI_STREAMING_READINGS;
+
+-- =============================================================================
+-- CLEANUP (if needed)
+-- =============================================================================
+-- To remove the deployment:
+-- DROP SERVICE IF EXISTS IDENTIFIER($service_name);
+-- DROP TABLE IF EXISTS AMI_STREAMING_READINGS;
+-- DROP IMAGE REPOSITORY IF EXISTS IDENTIFIER($image_repo_name);
+-- DROP COMPUTE POOL IF EXISTS IDENTIFIER($compute_pool_name);  -- if you created one

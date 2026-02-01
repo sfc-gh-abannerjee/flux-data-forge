@@ -1,0 +1,55 @@
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.p8
+*.key
+rsa_key.*
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+venv/
+.venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Docker
+*.log
+docker-compose.override.yml
+
+# Snowflake
+snowflake_credentials.json
+connection.toml
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
