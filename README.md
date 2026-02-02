@@ -28,6 +28,25 @@ Flux Data Forge is part of the **Flux Utility Platform** - a suite of Snowflake 
 
 **Recommended flow**: Deploy Flux Utility Solutions first, then use Data Forge to populate it with data, then add Ops Center for visualization.
 
+## Deployment Options
+
+Flux Data Forge supports multiple deployment paths to match your workflow:
+
+| Path | Best For | Getting Started |
+|------|----------|-----------------|
+| **CLI Quickstart** | Interactive guided deployment | `./scripts/quick_deploy.sh` |
+| **SQL Scripts** | Step-by-step manual control | Run scripts in `scripts/sql/` in order |
+| **Snowflake CLI** | Modern CLI-based deployment | `snow spcs service deploy flux_data_forge` |
+| **Terraform** | Infrastructure-as-Code, CI/CD | `cd terraform && terraform apply` |
+| **Git Integration** | Deploy from Snowflake UI | See `git_deploy/README.md` |
+
+### Quick Comparison
+
+- **New to SPCS?** Start with CLI Quickstart (`./scripts/quick_deploy.sh`)
+- **Want full control?** Use numbered SQL scripts in `scripts/sql/`
+- **Using CI/CD?** Use Terraform or Snowflake CLI with `snowflake.yml`
+- **Deploying from Snowflake?** Use Git Integration
+
 ---
 
 ## Features
@@ -238,27 +257,41 @@ flux-data-forge/
 ├── README.md               # This file
 ├── LICENSE                 # Apache 2.0 license
 ├── SECURITY.md             # Security model and RBAC
+├── CONTRIBUTING.md         # Contribution guidelines
+├── snowflake.yml           # Snowflake CLI project definition
 ├── .env.example            # Environment variable template
 ├── .gitignore              # Git ignore rules
 ├── .github/
 │   └── workflows/
 │       └── ci.yml          # CI/CD pipeline (lint, test, build, deploy)
 ├── spcs_app/
-│   ├── fastapi_app.py      # Main FastAPI application (12K lines)
+│   ├── fastapi_app.py      # Main FastAPI application
 │   ├── snowpipe_streaming_impl.py  # Snowpipe Streaming SDK wrapper
 │   ├── Dockerfile          # Container definition
 │   ├── requirements.txt    # Python dependencies
 │   ├── service_spec.yaml   # SPCS service specification template
-│   ├── deploy_spcs.sql     # Deployment script with pre-flight checks
+│   ├── deploy_spcs.sql     # Single-file deployment script
 │   └── build_and_push.sh   # Docker build automation
 ├── scripts/
-│   └── quick_deploy.sh     # Interactive one-click deployment
+│   ├── quick_deploy.sh     # Interactive CLI deployment
+│   └── sql/                # Modular SQL deployment scripts
+│       ├── README.md       # SQL scripts documentation
+│       ├── 01_database_schema.sql
+│       ├── 02_image_repository.sql
+│       ├── 03_compute_pool.sql
+│       ├── 04_target_table.sql
+│       ├── 05_create_service.sql
+│       └── 06_validation.sql
 ├── terraform/
 │   ├── main.tf             # Infrastructure resources
 │   ├── variables.tf        # Input variables
 │   ├── outputs.tf          # Output values
 │   ├── terraform.tfvars.example  # Example configuration
 │   └── README.md           # Terraform usage guide
+├── git_deploy/
+│   ├── README.md           # Git integration documentation
+│   ├── setup_git_integration.sql
+│   └── deploy_from_git.sql
 ├── tests/
 │   ├── smoke_test.py       # Quick validation tests
 │   └── test_unit.py        # Unit tests (pytest)

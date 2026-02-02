@@ -1,0 +1,103 @@
+# =============================================================================
+# Flux Data Forge - Snowflake CLI Project Definition
+# =============================================================================
+# This file enables deployment via Snowflake CLI:
+#   snow spcs service deploy flux_data_forge
+#
+# Prerequisites:
+#   - Snowflake CLI installed (pip install snowflake-cli)
+#   - Connection configured in ~/.snowflake/config.toml
+#   - Docker image pushed to image repository
+#
+# Usage:
+#   cd flux-data-forge
+#   snow spcs service deploy flux_data_forge
+#
+# For more info: https://docs.snowflake.com/en/developer-guide/snowflake-cli
+# =============================================================================
+
+definition_version: 2
+
+entities:
+  # ---------------------------------------------------------------------------
+  # SPCS Service: Flux Data Forge
+  # ---------------------------------------------------------------------------
+  flux_data_forge:
+    type: service
+    identifier:
+      name: FLUX_DATA_FORGE_SERVICE
+      # Uncomment and customize if deploying to specific db/schema:
+      # schema: MY_SCHEMA
+      # database: MY_DATABASE
+    
+    # Compute pool where the service runs
+    compute_pool: <% ctx.env.COMPUTE_POOL | default('FLUX_COMPUTE_POOL') %>
+    
+    # Stage where spec file is located (auto-created if needed)
+    stage: FLUX_DATA_FORGE_STAGE
+    
+    # Service specification file
+    spec_file: spcs_app/service_spec.yaml
+    
+    # Instance scaling
+    min_instances: 1
+    max_instances: 2
+    
+    # Auto-resume when accessed
+    auto_resume: true
+    
+    # Query warehouse for SQL operations within the service
+    query_warehouse: <% ctx.env.WAREHOUSE | default('FLUX_WH') %>
+    
+    # External access (uncomment if service needs internet access)
+    # external_access_integrations:
+    #   - PYPI_ACCESS_INTEGRATION
+    
+    # Artifacts to upload to the stage
+    artifacts:
+      - spcs_app/service_spec.yaml
+    
+    comment: "Flux Data Forge - Synthetic AMI Data Generation Service"
+    
+    # Tags for governance
+    tags:
+      - name: application
+        value: flux_data_forge
+      - name: environment
+        value: <% ctx.env.ENVIRONMENT | default('dev') %>
+
+  # ---------------------------------------------------------------------------
+  # Compute Pool (optional - deploy separately if needed)
+  # ---------------------------------------------------------------------------
+  flux_compute_pool:
+    type: compute_pool
+    identifier:
+      name: <% ctx.env.COMPUTE_POOL | default('FLUX_COMPUTE_POOL') %>
+    
+    instance_family: CPU_X64_S
+    min_nodes: 1
+    max_nodes: 2
+    
+    auto_resume: true
+    auto_suspend_secs: 300
+    
+    comment: "Compute pool for Flux Data Forge SPCS"
+
+# =============================================================================
+# Environment Variables
+# =============================================================================
+# Set these via --env flag or in your shell:
+#   snow spcs service deploy flux_data_forge --env COMPUTE_POOL=MY_POOL
+#
+# Or export them:
+#   export COMPUTE_POOL=MY_POOL
+#   export WAREHOUSE=MY_WH
+#   export ENVIRONMENT=prod
+#   snow spcs service deploy flux_data_forge
+# =============================================================================
+
+env:
+  # Default values (override via --env or environment variables)
+  COMPUTE_POOL: FLUX_COMPUTE_POOL
+  WAREHOUSE: FLUX_WH
+  ENVIRONMENT: dev
