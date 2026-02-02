@@ -63,22 +63,24 @@ Flux Data Forge supports multiple deployment paths to match your workflow:
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Flux Data Forge (SPCS)                      │
-│                                                                 │
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐         │
-│  │   FastAPI   │───▶│  Generator  │───▶│  Streaming  │         │
-│  │   Web UI    │    │   Engine    │    │   Workers   │         │
-│  └─────────────┘    └─────────────┘    └─────────────┘         │
-└────────────────────────────┬────────────────────────────────────┘
-                             │
-           ┌─────────────────┼─────────────────┐
-           ▼                 ▼                 ▼
-    ┌────────────┐    ┌────────────┐    ┌────────────┐
-    │ Snowflake  │    │ S3 Stage   │    │  Postgres  │
-    │   Table    │    │ (Bronze)   │    │  (OLTP)    │
-    └────────────┘    └────────────┘    └────────────┘
+```mermaid
+flowchart TB
+    subgraph SPCS["Snowpark Container Services"]
+        UI["FastAPI<br/>Web UI"]
+        GEN["Generator<br/>Engine"]
+        STREAM["Streaming<br/>Workers"]
+        UI --> GEN --> STREAM
+    end
+    
+    subgraph TARGETS["Data Targets"]
+        SF[("Snowflake<br/>Table")]
+        S3[("S3 Stage<br/>Bronze")]
+        PG[("Postgres<br/>OLTP")]
+    end
+    
+    STREAM --> SF
+    STREAM --> S3
+    STREAM --> PG
 ```
 
 ## Prerequisites
