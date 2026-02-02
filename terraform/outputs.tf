@@ -17,21 +17,6 @@ output "warehouse_name" {
   value       = var.create_warehouse ? snowflake_warehouse.flux_wh[0].name : var.warehouse_name
 }
 
-output "image_repository_name" {
-  description = "Name of the image repository"
-  value       = snowflake_image_repository.flux_repo.name
-}
-
-output "image_repository_url" {
-  description = "Full URL of the image repository for docker push"
-  value       = snowflake_image_repository.flux_repo.repository_url
-}
-
-output "compute_pool_name" {
-  description = "Name of the compute pool"
-  value       = local.compute_pool_name
-}
-
 output "target_table_name" {
   description = "Name of the target table"
   value       = snowflake_table.ami_streaming_readings.name
@@ -44,40 +29,70 @@ output "target_table_fqn" {
 
 output "service_role_name" {
   description = "Name of the service role (if created)"
-  value       = var.create_service_role ? snowflake_role.flux_service_role[0].name : null
+  value       = var.create_service_role ? snowflake_account_role.flux_service_role[0].name : null
 }
 
 # -----------------------------------------------------------------------------
-# Docker Push Command
+# SPCS Setup SQL (run after Terraform apply)
 # -----------------------------------------------------------------------------
 
-output "docker_push_command" {
-  description = "Command to push Docker image to Snowflake registry"
+output "spcs_setup_sql" {
+  description = "SQL commands to set up SPCS resources (run after Terraform)"
   value       = <<-EOT
-    # 1. Login to Snowflake registry
-    docker login ${snowflake_image_repository.flux_repo.repository_url}
+    -- ==========================================================================
+    -- Run these SQL commands after Terraform apply to complete SPCS setup
+    -- ==========================================================================
+    
+    USE DATABASE ${local.database_name};
+    USE SCHEMA ${local.schema_name};
+    
+    -- 1. Create Image Repository
+    CREATE IMAGE REPOSITORY IF NOT EXISTS ${var.image_repository_name}
+        COMMENT = 'Image repository for Flux Data Forge';
+    
+    -- Get repository URL for docker push:
+    SHOW IMAGE REPOSITORIES LIKE '${var.image_repository_name}';
+    
+    -- 2. Create Compute Pool
+    CREATE COMPUTE POOL IF NOT EXISTS ${var.compute_pool_name}
+        MIN_NODES = ${var.compute_pool_min_nodes}
+        MAX_NODES = ${var.compute_pool_max_nodes}
+        INSTANCE_FAMILY = ${var.compute_pool_instance_family}
+        AUTO_RESUME = TRUE
+        AUTO_SUSPEND_SECS = ${var.compute_pool_auto_suspend_secs}
+        COMMENT = 'Compute pool for Flux Data Forge';
+    
+    -- 3. After pushing Docker image, create service using:
+    --    scripts/sql/05_create_service.sql
+  EOT
+}
+
+output "docker_commands" {
+  description = "Docker commands to build and push image"
+  value       = <<-EOT
+    # After running the SPCS setup SQL above, get the repository URL and run:
+    
+    # 1. Login to Snowflake registry (get URL from SHOW IMAGE REPOSITORIES)
+    docker login <ORG>-<ACCOUNT>.registry.snowflakecomputing.com
     
     # 2. Build the image
     cd spcs_app
     docker build -t flux_data_forge:${var.service_image_tag} .
     
     # 3. Tag for Snowflake registry
-    docker tag flux_data_forge:${var.service_image_tag} ${snowflake_image_repository.flux_repo.repository_url}/flux_data_forge:${var.service_image_tag}
+    docker tag flux_data_forge:${var.service_image_tag} \
+      <ORG>-<ACCOUNT>.registry.snowflakecomputing.com/${local.database_name}/${local.schema_name}/${var.image_repository_name}/flux_data_forge:${var.service_image_tag}
     
     # 4. Push to registry
-    docker push ${snowflake_image_repository.flux_repo.repository_url}/flux_data_forge:${var.service_image_tag}
+    docker push <ORG>-<ACCOUNT>.registry.snowflakecomputing.com/${local.database_name}/${local.schema_name}/${var.image_repository_name}/flux_data_forge:${var.service_image_tag}
   EOT
 }
-
-# -----------------------------------------------------------------------------
-# Service Creation SQL
-# -----------------------------------------------------------------------------
 
 output "create_service_sql" {
   description = "SQL to create the SPCS service (run after pushing image)"
   value       = <<-EOT
     CREATE SERVICE IF NOT EXISTS ${local.database_name}.${local.schema_name}.${var.service_name}
-      IN COMPUTE POOL ${local.compute_pool_name}
+      IN COMPUTE POOL ${var.compute_pool_name}
       FROM SPECIFICATION $$
     spec:
       containers:

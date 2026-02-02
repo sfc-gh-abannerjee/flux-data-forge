@@ -29,21 +29,34 @@ DESCRIBE COMPUTE POOL IDENTIFIER($compute_pool_name);
 
 -- Create the SPCS service
 -- Note: The image path format is /<database>/<schema>/<repo>/<image>:<tag>
+-- IMPORTANT: Since SQL variables can't be used inside the YAML spec, you must
+-- manually update the image path and env vars below to match your configuration!
+
+-- ============================================================================
+-- MANUAL CONFIGURATION REQUIRED:
+-- Update these values in the spec below to match your environment:
+--   - image: /<YOUR_DATABASE>/<YOUR_SCHEMA>/<YOUR_REPO>/flux_data_forge:<tag>
+--   - SNOWFLAKE_DATABASE: <YOUR_DATABASE>
+--   - SNOWFLAKE_SCHEMA: <YOUR_SCHEMA>
+--   - SNOWFLAKE_WAREHOUSE: <YOUR_WAREHOUSE>
+-- ============================================================================
+
 CREATE SERVICE IF NOT EXISTS IDENTIFIER($service_name)
     IN COMPUTE POOL IDENTIFIER($compute_pool_name)
     FROM SPECIFICATION $$
 spec:
   containers:
     - name: flux-data-forge
+      # UPDATE THIS PATH to match your database/schema/repo
       image: /FLUX_DATA_FORGE/PUBLIC/FLUX_DATA_FORGE_REPO/flux_data_forge:latest
       env:
+        # UPDATE THESE to match your configuration
         SNOWFLAKE_DATABASE: FLUX_DATA_FORGE
         SNOWFLAKE_SCHEMA: PUBLIC
         SNOWFLAKE_WAREHOUSE: FLUX_DATA_FORGE_WH
         SNOWFLAKE_ROLE: SYSADMIN
         AMI_TABLE: AMI_STREAMING_READINGS
         SERVICE_AREA: HOUSTON_METRO
-        # Logging level
         LOG_LEVEL: INFO
       resources:
         requests:

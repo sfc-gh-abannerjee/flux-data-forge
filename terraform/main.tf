@@ -1,18 +1,26 @@
 # =============================================================================
 # Flux Data Forge - Terraform Module
 # =============================================================================
-# This module provisions all Snowflake infrastructure required for
+# This module provisions Snowflake infrastructure required for
 # Flux Data Forge SPCS deployment.
 #
+# IMPORTANT LIMITATIONS:
+# The Snowflake Terraform provider does NOT support SPCS-specific resources:
+#   - Compute Pools (CREATE COMPUTE POOL)
+#   - Image Repositories (CREATE IMAGE REPOSITORY)  
+#   - Services (CREATE SERVICE)
+#
+# These must be created via SQL. See scripts/sql/ for SQL deployment scripts.
+# This Terraform module handles: Database, Schema, Warehouse, and Target Table.
+#
 # Usage:
-#   module "flux_data_forge" {
-#     source = "./terraform"
-#     
-#     database_name    = "MY_DATABASE"
-#     schema_name      = "MY_SCHEMA"
-#     warehouse_name   = "MY_WAREHOUSE"
-#     compute_pool_name = "MY_COMPUTE_POOL"
-#   }
+#   cd terraform
+#   cp terraform.tfvars.example terraform.tfvars
+#   # Edit terraform.tfvars with your values
+#   terraform init
+#   terraform plan
+#   terraform apply
+#   # Then run SQL scripts for SPCS resources
 # =============================================================================
 
 terraform {
@@ -21,7 +29,7 @@ terraform {
   required_providers {
     snowflake = {
       source  = "Snowflake-Labs/snowflake"
-      version = ">= 0.87.0"
+      version = ">= 0.89.0, < 1.0.0"
     }
   }
 }
@@ -45,8 +53,6 @@ resource "snowflake_schema" "flux_schema" {
   database = var.create_database ? snowflake_database.flux_db[0].name : var.database_name
   name     = var.schema_name
   comment  = "Schema for Flux Data Forge"
-  
-  is_managed = false
 }
 
 locals {
@@ -72,39 +78,27 @@ resource "snowflake_warehouse" "flux_wh" {
 }
 
 # =============================================================================
-# IMAGE REPOSITORY
+# SPCS RESOURCES (NOT SUPPORTED BY TERRAFORM)
 # =============================================================================
-
-resource "snowflake_image_repository" "flux_repo" {
-  name     = var.image_repository_name
-  database = local.database_name
-  schema   = local.schema_name
-  
-  # Note: Depends on schema existing
-  depends_on = [snowflake_schema.flux_schema]
-}
-
+# The following resources must be created via SQL:
+#
+# 1. IMAGE REPOSITORY:
+#    CREATE IMAGE REPOSITORY IF NOT EXISTS <database>.<schema>.<repo_name>;
+#
+# 2. COMPUTE POOL:
+#    CREATE COMPUTE POOL IF NOT EXISTS <pool_name>
+#        MIN_NODES = 1
+#        MAX_NODES = 2
+#        INSTANCE_FAMILY = CPU_X64_S
+#        AUTO_RESUME = TRUE
+#        AUTO_SUSPEND_SECS = 300;
+#
+# 3. SERVICE:
+#    CREATE SERVICE ... (see scripts/sql/05_create_service.sql)
+#
+# Use the provided SQL scripts: scripts/sql/02_image_repository.sql,
+# scripts/sql/03_compute_pool.sql, scripts/sql/05_create_service.sql
 # =============================================================================
-# COMPUTE POOL
-# =============================================================================
-
-resource "snowflake_compute_pool" "flux_pool" {
-  count = var.create_compute_pool ? 1 : 0
-  
-  name            = var.compute_pool_name
-  instance_family = var.compute_pool_instance_family
-  min_nodes       = var.compute_pool_min_nodes
-  max_nodes       = var.compute_pool_max_nodes
-  
-  auto_resume  = true
-  auto_suspend_secs = var.compute_pool_auto_suspend_secs
-  
-  comment = "Compute pool for Flux Data Forge SPCS"
-}
-
-locals {
-  compute_pool_name = var.create_compute_pool ? snowflake_compute_pool.flux_pool[0].name : var.compute_pool_name
-}
 
 # =============================================================================
 # TARGET TABLE
@@ -246,44 +240,17 @@ resource "snowflake_table" "ami_streaming_readings" {
 # SERVICE ROLE (Optional)
 # =============================================================================
 
-resource "snowflake_role" "flux_service_role" {
+resource "snowflake_account_role" "flux_service_role" {
   count = var.create_service_role ? 1 : 0
   
   name    = var.service_role_name
   comment = "Role for Flux Data Forge service"
 }
 
-resource "snowflake_grant_privileges_to_role" "flux_warehouse_usage" {
+# Grant role to SYSADMIN for management
+resource "snowflake_grant_account_role" "flux_role_to_sysadmin" {
   count = var.create_service_role ? 1 : 0
   
-  privileges = ["USAGE"]
-  role_name  = snowflake_role.flux_service_role[0].name
-  
-  on_account_object {
-    object_type = "WAREHOUSE"
-    object_name = var.create_warehouse ? snowflake_warehouse.flux_wh[0].name : var.warehouse_name
-  }
-}
-
-resource "snowflake_grant_privileges_to_role" "flux_schema_usage" {
-  count = var.create_service_role ? 1 : 0
-  
-  privileges = ["USAGE"]
-  role_name  = snowflake_role.flux_service_role[0].name
-  
-  on_schema {
-    schema_name = "\"${local.database_name}\".\"${local.schema_name}\""
-  }
-}
-
-resource "snowflake_grant_privileges_to_role" "flux_table_privileges" {
-  count = var.create_service_role ? 1 : 0
-  
-  privileges = ["SELECT", "INSERT", "UPDATE", "DELETE"]
-  role_name  = snowflake_role.flux_service_role[0].name
-  
-  on_schema_object {
-    object_type = "TABLE"
-    object_name = "\"${local.database_name}\".\"${local.schema_name}\".\"${snowflake_table.ami_streaming_readings.name}\""
-  }
+  role_name        = snowflake_account_role.flux_service_role[0].name
+  parent_role_name = "SYSADMIN"
 }
