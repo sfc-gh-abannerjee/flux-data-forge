@@ -16,6 +16,20 @@ Synthetic AMI (Advanced Metering Infrastructure) data generation platform for Sn
 
 > **Quick Deploy**: Run `./scripts/quick_deploy.sh` for guided interactive deployment!
 
+## Flux Utility Platform
+
+Flux Data Forge is part of the **Flux Utility Platform** - a suite of Snowflake solutions for utility industry demos:
+
+| Repository | Purpose | Start Here If... |
+|------------|---------|------------------|
+| [Flux Utility Solutions](https://github.com/sfc-gh-abannerjee/flux-utility-solutions) | Core platform with Cortex AI, semantic models, 5 deployment paths | You're building a complete utility demo |
+| **Flux Data Forge** (this repo) | Synthetic AMI data generation with streaming | You need realistic test data at scale |
+| [Flux Ops Center](https://github.com/sfc-gh-abannerjee/flux-ops-center-spcs) | Real-time grid visualization, GNN risk prediction | You need interactive grid maps |
+
+**Recommended flow**: Deploy Flux Utility Solutions first, then use Data Forge to populate it with data, then add Ops Center for visualization.
+
+---
+
 ## Features
 
 - **Batch Generation**: Generate historical AMI datasets (7 days to 1 year)
@@ -299,18 +313,6 @@ See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for common issues:
 |----------|---------------|
 | **Snowflake Provider** | [Terraform Provider](https://registry.terraform.io/providers/Snowflake-Labs/snowflake/latest/docs) |
 | **Compute Pool Resource** | [snowflake_compute_pool](https://registry.terraform.io/providers/Snowflake-Labs/snowflake/latest/docs/resources/compute_pool) |
-
-## Flux Utility Platform
-
-Flux Data Forge is part of the **Flux Utility Platform** - a suite of Snowflake solutions for utility industry demos:
-
-| Repository | Purpose | Start Here If... |
-|------------|---------|------------------|
-| [Flux Utility Solutions](https://github.com/sfc-gh-abannerjee/flux-utility-solutions) | Core platform with Cortex AI, semantic models, 5 deployment paths | You're building a complete utility demo |
-| **Flux Data Forge** (this repo) | Synthetic AMI data generation with streaming | You need realistic test data at scale |
-| [Flux Ops Center](https://github.com/sfc-gh-abannerjee/flux-ops-center-spcs) | Real-time grid visualization, GNN risk prediction | You need interactive grid maps |
-
-**Recommended flow**: Deploy Flux Utility Solutions first, then use Data Forge to populate it with data, then add Ops Center for visualization.
 
 ---
 
