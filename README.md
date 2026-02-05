@@ -3,12 +3,47 @@
 [![Snowflake](https://img.shields.io/badge/Snowflake-29B5E8?logo=snowflake&logoColor=white)](https://www.snowflake.com)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-Synthetic AMI (Advanced Metering Infrastructure) data generation platform for Snowflake demos. Generates realistic smart meter readings at configurable scale (67K to 350M+ rows) with real-time streaming capabilities.
+**Synthetic AMI data generation platform for Snowflake demos.** Generate realistic smart meter readings at configurable scale (67K to 350M+ rows) with real-time streaming capabilities.
 
 <p align="center">
   <img width="49%" alt="Flux Data Forge - Generation Interface" src="assets/flux_data_forge_generate_1.png" />
   <img width="49%" alt="Flux Data Forge - Data Preview" src="assets/flux_data_forge_generate_2.png" />
 </p>
+
+---
+
+## TL;DR - Get Started in 3 Commands
+
+```bash
+git clone https://github.com/sfc-gh-abannerjee/flux-data-forge.git
+cd flux-data-forge
+snow sql -c your_connection -f scripts/sql/00_standalone_quickstart.sql  # Creates database + infrastructure
+# Then build/push Docker image and create service (see Standalone Quick Start below)
+```
+
+---
+
+## Table of Contents
+
+- [Choose Your Deployment Path](#choose-your-deployment-path)
+- [Standalone Quick Start](#standalone-quick-start-fastest) ⭐ Recommended for first-time users
+- [Integrated Deployment](#integrated-deployment-full-platform)
+- [Features](#features)
+- [Data Schema](#data-schema)
+- [Architecture](#architecture)
+- [Troubleshooting](#troubleshooting)
+
+---
+
+## Flux Utility Platform
+
+Flux Data Forge is part of a suite of Snowflake solutions:
+
+| Repository | Purpose | Deploy Order |
+|------------|---------|--------------|
+| [**Flux Utility Solutions**](https://github.com/sfc-gh-abannerjee/flux-utility-solutions) | Core platform - database, Cortex AI, semantic models | 1st (if using integrated path) |
+| **Flux Data Forge** (this repo) | Synthetic AMI data generation | 2nd (or standalone) |
+| [Flux Ops Center](https://github.com/sfc-gh-abannerjee/flux-ops-center-spcs) | Real-time grid visualization | 3rd (optional) |
 
 ---
 
