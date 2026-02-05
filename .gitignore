@@ -53,3 +53,5 @@ connection.toml
 *.tmp
 *.temp
 .cache/
+# Terraform
+.terraform/

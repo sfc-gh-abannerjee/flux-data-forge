@@ -3,57 +3,51 @@
 -- =============================================================================
 -- Creates the Snowpark Container Service that runs Flux Data Forge.
 --
+-- Variables (Jinja2 syntax for Snow CLI):
+--   <% database %>       - Target database name
+--   <% schema %>         - Schema name (default: PUBLIC)
+--   <% warehouse %>      - Warehouse name
+--   <% compute_pool %>   - Compute pool name
+--   <% image_repo %>     - Image repository name
+--   <% service_name %>   - SPCS service name
+--   <% image_tag %>      - Docker image tag (default: latest)
+--
+-- Usage:
+--   snow sql -f scripts/sql/05_create_service.sql \
+--       -D "database=FLUX_DATA_FORGE" \
+--       -D "schema=PUBLIC" \
+--       -D "warehouse=FLUX_DATA_FORGE_WH" \
+--       -D "compute_pool=FLUX_DATA_FORGE_POOL" \
+--       -D "image_repo=FLUX_DATA_FORGE_REPO" \
+--       -D "service_name=FLUX_DATA_FORGE_SERVICE" \
+--       -D "image_tag=latest" \
+--       -c your_connection_name
+--
 -- Prerequisites:
 --   - Run scripts 01-04 first
 --   - Docker image must be pushed to the image repository
 --   - Compute pool must be in IDLE or ACTIVE state
---
--- IMPORTANT: Update the image path below to match your environment!
 -- =============================================================================
 
--- Configuration - UPDATE THESE VALUES
-SET database_name = 'FLUX_DATA_FORGE';
-SET schema_name = 'PUBLIC';
-SET warehouse_name = 'FLUX_DATA_FORGE_WH';
-SET compute_pool_name = 'FLUX_DATA_FORGE_POOL';
-SET image_repo_name = 'FLUX_DATA_FORGE_REPO';
-SET service_name = 'FLUX_DATA_FORGE_SERVICE';
-SET image_tag = 'latest';
-
-USE DATABASE IDENTIFIER($database_name);
-USE SCHEMA IDENTIFIER($schema_name);
-USE WAREHOUSE IDENTIFIER($warehouse_name);
+USE DATABASE IDENTIFIER('<% database %>');
+USE SCHEMA IDENTIFIER('<% schema %>');
+USE WAREHOUSE IDENTIFIER('<% warehouse %>');
 
 -- Verify compute pool is ready
-DESCRIBE COMPUTE POOL IDENTIFIER($compute_pool_name);
+DESCRIBE COMPUTE POOL IDENTIFIER('<% compute_pool %>');
 
 -- Create the SPCS service
--- Note: The image path format is /<database>/<schema>/<repo>/<image>:<tag>
--- IMPORTANT: Since SQL variables can't be used inside the YAML spec, you must
--- manually update the image path and env vars below to match your configuration!
-
--- ============================================================================
--- MANUAL CONFIGURATION REQUIRED:
--- Update these values in the spec below to match your environment:
---   - image: /<YOUR_DATABASE>/<YOUR_SCHEMA>/<YOUR_REPO>/flux_data_forge:<tag>
---   - SNOWFLAKE_DATABASE: <YOUR_DATABASE>
---   - SNOWFLAKE_SCHEMA: <YOUR_SCHEMA>
---   - SNOWFLAKE_WAREHOUSE: <YOUR_WAREHOUSE>
--- ============================================================================
-
-CREATE SERVICE IF NOT EXISTS IDENTIFIER($service_name)
-    IN COMPUTE POOL IDENTIFIER($compute_pool_name)
+CREATE SERVICE IF NOT EXISTS IDENTIFIER('<% service_name %>')
+    IN COMPUTE POOL IDENTIFIER('<% compute_pool %>')
     FROM SPECIFICATION $$
 spec:
   containers:
     - name: flux-data-forge
-      # UPDATE THIS PATH to match your database/schema/repo
-      image: /FLUX_DATA_FORGE/PUBLIC/FLUX_DATA_FORGE_REPO/flux_data_forge:latest
+      image: /<% database %>/<% schema %>/<% image_repo %>/flux_data_forge:<% image_tag %>
       env:
-        # UPDATE THESE to match your configuration
-        SNOWFLAKE_DATABASE: FLUX_DATA_FORGE
-        SNOWFLAKE_SCHEMA: PUBLIC
-        SNOWFLAKE_WAREHOUSE: FLUX_DATA_FORGE_WH
+        SNOWFLAKE_DATABASE: <% database %>
+        SNOWFLAKE_SCHEMA: <% schema %>
+        SNOWFLAKE_WAREHOUSE: <% warehouse %>
         SNOWFLAKE_ROLE: SYSADMIN
         AMI_TABLE: AMI_STREAMING_READINGS
         SERVICE_AREA: HOUSTON_METRO
@@ -74,13 +68,13 @@ $$
     COMMENT = 'Flux Data Forge - Synthetic AMI Data Generation Service';
 
 -- Check service status (wait for READY)
-SELECT SYSTEM$GET_SERVICE_STATUS($service_name);
+SELECT SYSTEM$GET_SERVICE_STATUS('<% service_name %>');
 
 -- Get service endpoints (the app URL)
-SHOW ENDPOINTS IN SERVICE IDENTIFIER($service_name);
+SHOW ENDPOINTS IN SERVICE IDENTIFIER('<% service_name %>');
 
 SELECT 
     'SPCS Service' as STEP,
-    $service_name as SERVICE_NAME,
+    '<% service_name %>' as SERVICE_NAME,
     'Check SHOW ENDPOINTS for the application URL' as NEXT_ACTION,
     'SUCCESS' as STATUS;

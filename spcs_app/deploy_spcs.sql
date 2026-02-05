@@ -142,7 +142,7 @@ CREATE TABLE IF NOT EXISTS AMI_STREAMING_READINGS (
 )
 CLUSTER BY (DATE_TRUNC('DAY', READING_TIMESTAMP), METER_ID)
 DATA_RETENTION_TIME_IN_DAYS = 7
-CHANGE_TRACKING = ON
+CHANGE_TRACKING = TRUE
 COMMENT = 'Streaming landing table for AMI data from Flux Data Forge';
 
 -- =============================================================================

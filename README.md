@@ -3,9 +3,7 @@
 [![Snowflake](https://img.shields.io/badge/Snowflake-29B5E8?logo=snowflake&logoColor=white)](https://www.snowflake.com)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-Synthetic AMI (Advanced Metering Infrastructure) data generation platform for Snowflake demos and POCs. Generates realistic smart meter readings at configurable scale (67K to 350M+ rows) with real-time streaming capabilities.
-
----
+Synthetic AMI (Advanced Metering Infrastructure) data generation platform for Snowflake demos. Generates realistic smart meter readings at configurable scale (67K to 350M+ rows) with real-time streaming capabilities.
 
 <p align="center">
   <img width="49%" alt="Flux Data Forge - Generation Interface" src="assets/flux_data_forge_generate_1.png" />
@@ -14,52 +12,323 @@ Synthetic AMI (Advanced Metering Infrastructure) data generation platform for Sn
 
 ---
 
-> **Quick Deploy**: Run `./scripts/quick_deploy.sh` for guided interactive deployment!
+## Choose Your Deployment Path
 
-## Flux Utility Platform
+Flux Data Forge can be deployed in two ways. **Pick the one that matches your needs:**
 
-Flux Data Forge is part of the **Flux Utility Platform** - a suite of Snowflake solutions for utility industry demos:
+| Path | Best For | Time to Deploy | What You Get |
+|------|----------|----------------|--------------|
+| **[Standalone Quick Start](#standalone-quick-start-fastest)** | Quick demos, generating test data, independent use | ~15 minutes | Self-contained database for AMI data generation |
+| **[Integrated with Flux Platform](#integrated-deployment-full-platform)** | Full utility platform, shared data model | ~30-45 minutes | Shared database across all Flux applications |
 
-| Repository | Purpose | Start Here If... |
-|------------|---------|------------------|
-| [Flux Utility Solutions](https://github.com/sfc-gh-abannerjee/flux-utility-solutions) | Core platform with Cortex AI, semantic models, 5 deployment paths | You're building a complete utility demo |
-| **Flux Data Forge** (this repo) | Synthetic AMI data generation with streaming | You need realistic test data at scale |
-| [Flux Ops Center](https://github.com/sfc-gh-abannerjee/flux-ops-center-spcs) | Real-time grid visualization, GNN risk prediction | You need interactive grid maps |
+**Not sure which to pick?** Start with Standalone - you can always migrate to the full platform later.
 
-**Recommended flow**: Deploy Flux Utility Solutions first, then use Data Forge to populate it with data, then add Ops Center for visualization.
+---
 
-## Deployment Options
+## Standalone Quick Start (Fastest)
 
-Flux Data Forge supports multiple deployment paths to match your workflow:
+**No other repositories required.** This option creates everything you need to generate synthetic AMI data.
 
-| Path | Best For | Getting Started |
-|------|----------|-----------------|
+### Prerequisites
+
+- Snowflake account with `ACCOUNTADMIN` role (or equivalent)
+- [Snowflake CLI (Snow CLI)](https://docs.snowflake.com/en/developer-guide/snowflake-cli/installation/installation) installed and configured
+- Docker Desktop installed and running
+
+### Step 1: Set Up Your Snowflake CLI Connection
+
+If you haven't already configured the Snowflake CLI, run:
+
+```bash
+snow connection add
+```
+
+This will prompt you for:
+- **Connection name**: A name for your connection (e.g., `my_flux_demo`)
+- **Account**: Your Snowflake account identifier (e.g., `abc12345.us-east-1`)
+- **User**: Your Snowflake username
+- **Authentication**: Choose password, SSO, or key-pair
+
+Test your connection:
+
+```bash
+snow connection test -c my_flux_demo
+```
+
+### Step 2: Run the Standalone Setup Script
+
+```bash
+# Clone this repository
+git clone https://github.com/sfc-gh-abannerjee/flux-data-forge.git
+cd flux-data-forge
+
+# Run the standalone setup (creates database, tables, SPCS infrastructure)
+snow sql -c my_flux_demo -f scripts/sql/00_standalone_quickstart.sql
+```
+
+**What this creates:**
+- `FLUX_DATA_FORGE` database with `PUBLIC` schema
+- `FLUX_DATA_FORGE_WH` warehouse
+- `AMI_STREAMING_READINGS` table for generated data
+- Image repository and compute pool for SPCS
+
+### Step 3: Build and Push Docker Image
+
+```bash
+# Get your repository URL from the setup output, or run:
+snow sql -c my_flux_demo -q "SHOW IMAGE REPOSITORIES IN SCHEMA FLUX_DATA_FORGE.PUBLIC"
+
+# Login to Snowflake registry (replace with your org-account)
+docker login <org>-<account>.registry.snowflakecomputing.com
+
+# Build the image
+docker build -t flux_data_forge:latest -f spcs_app/Dockerfile spcs_app/
+
+# Tag for Snowflake (replace <repository_url> with URL from above)
+docker tag flux_data_forge:latest <repository_url>/flux_data_forge:latest
+
+# Push to Snowflake
+docker push <repository_url>/flux_data_forge:latest
+```
+
+### Step 4: Create the SPCS Service
+
+After pushing the Docker image, create the service:
+
+```bash
+# The CREATE SERVICE statement is in the quickstart script (Step 6)
+# Open scripts/sql/00_standalone_quickstart.sql
+# Uncomment the CREATE SERVICE block and run it
+```
+
+Or run directly:
+
+```sql
+CREATE SERVICE FLUX_DATA_FORGE_SERVICE
+    IN COMPUTE POOL FLUX_DATA_FORGE_POOL
+    FROM SPECIFICATION $$
+spec:
+  containers:
+    - name: flux-data-forge
+      image: /FLUX_DATA_FORGE/PUBLIC/FLUX_DATA_FORGE_REPO/flux_data_forge:latest
+      env:
+        SNOWFLAKE_DATABASE: FLUX_DATA_FORGE
+        SNOWFLAKE_SCHEMA: PUBLIC
+        SNOWFLAKE_WAREHOUSE: FLUX_DATA_FORGE_WH
+        SNOWFLAKE_ROLE: SYSADMIN
+        AMI_TABLE: AMI_STREAMING_READINGS
+        SERVICE_AREA: HOUSTON_METRO
+        LOG_LEVEL: INFO
+      resources:
+        requests:
+          cpu: 1
+          memory: 2Gi
+        limits:
+          cpu: 2
+          memory: 4Gi
+  endpoints:
+    - name: app
+      port: 8080
+      public: true
+$$;
+```
+
+### Step 5: Access Your Application
+
+```sql
+-- Get the application URL
+SHOW ENDPOINTS IN SERVICE FLUX_DATA_FORGE_SERVICE;
+```
+
+Open the URL in your browser and start generating data.
+
+---
+
+## Integrated Deployment (Full Platform)
+
+**Use this if you want the complete Flux Utility Platform** with shared data across multiple applications.
+
+### The Flux Utility Platform
+
+Flux Data Forge is part of a suite of Snowflake solutions:
+
+| Repository | Purpose | When to Use |
+|------------|---------|-------------|
+| [Flux Utility Solutions](https://github.com/sfc-gh-abannerjee/flux-utility-solutions) | Core platform with Cortex AI, semantic models | Building a complete utility demo |
+| **Flux Data Forge** (this repo) | Synthetic AMI data generation with streaming | Need realistic test data at scale |
+| [Flux Ops Center](https://github.com/sfc-gh-abannerjee/flux-ops-center-spcs) | Real-time grid visualization, GNN risk prediction | Need interactive grid maps |
+
+### Prerequisites
+
+- Snowflake account with `ACCOUNTADMIN` role
+- [Snowflake CLI](https://docs.snowflake.com/en/developer-guide/snowflake-cli/installation/installation) installed
+- Docker Desktop installed
+
+### Step 1: Deploy Flux Utility Solutions First
+
+```bash
+# Clone the core platform
+git clone https://github.com/sfc-gh-abannerjee/flux-utility-solutions.git
+cd flux-utility-solutions
+
+# Run the quickstart (interactive prompts)
+./cli/quickstart.sh --database FLUX_DB --connection my_flux_demo
+```
+
+### Step 2: Deploy Flux Data Forge
+
+```bash
+# Navigate to this repository
+cd ../flux-data-forge
+
+# Run the interactive deployment
+./scripts/quick_deploy.sh
+```
+
+### Understanding the SQL Scripts (For Manual Deployment)
+
+The SQL scripts in `scripts/sql/` use **Jinja2 templating** - a way to make scripts configurable without editing the SQL directly.
+
+**What is Jinja2 templating?**
+
+Instead of hardcoding values like database names, we use placeholders:
+
+```sql
+-- In the SQL file, you'll see:
+USE DATABASE <% database %>;
+CREATE TABLE <% database %>.<% schema %>.AMI_READINGS (...);
+
+-- When you run with Snow CLI, you provide the values:
+snow sql -f script.sql -D "database=FLUX_DB" -D "schema=PUBLIC"
+
+-- The CLI replaces the placeholders with your values before executing
+```
+
+**The `-D` flag** passes variables to the script. Common variables you'll see:
+
+| Variable | What It Means | Example Value |
+|----------|---------------|---------------|
+| `database` | Target database name | `FLUX_DB` or `FLUX_DATA_FORGE` |
+| `schema` | Target schema name | `PUBLIC` |
+| `warehouse` | Compute warehouse | `FLUX_DATA_FORGE_WH` |
+| `compute_pool` | SPCS compute pool | `FLUX_DATA_FORGE_POOL` |
+| `image_repo` | Docker image repository | `FLUX_DATA_FORGE_REPO` |
+| `service_name` | SPCS service name | `FLUX_DATA_FORGE_SERVICE` |
+
+**Example: Running scripts with variables**
+
+```bash
+# Set your connection name
+export CONN="my_flux_demo"
+
+# 1. Database and schema
+snow sql -c $CONN -f scripts/sql/01_database_schema.sql \
+    -D "database=FLUX_DB" \
+    -D "schema=PUBLIC" \
+    -D "warehouse=FLUX_DATA_FORGE_WH"
+
+# 2. Image repository
+snow sql -c $CONN -f scripts/sql/02_image_repository.sql \
+    -D "database=FLUX_DB" \
+    -D "schema=PUBLIC" \
+    -D "image_repo=FLUX_DATA_FORGE_REPO"
+
+# 3. Compute pool
+snow sql -c $CONN -f scripts/sql/03_compute_pool.sql \
+    -D "compute_pool=FLUX_DATA_FORGE_POOL" \
+    -D "instance_family=CPU_X64_S" \
+    -D "min_nodes=1" \
+    -D "max_nodes=2"
+
+# 4. Target table
+snow sql -c $CONN -f scripts/sql/04_target_table.sql \
+    -D "database=FLUX_DB" \
+    -D "schema=PUBLIC"
+
+# 5. Build and push Docker image (see Step 3 in Standalone section)
+
+# 6. Create service
+snow sql -c $CONN -f scripts/sql/05_create_service.sql \
+    -D "database=FLUX_DB" \
+    -D "schema=PUBLIC" \
+    -D "warehouse=FLUX_DATA_FORGE_WH" \
+    -D "compute_pool=FLUX_DATA_FORGE_POOL" \
+    -D "image_repo=FLUX_DATA_FORGE_REPO" \
+    -D "service_name=FLUX_DATA_FORGE_SERVICE" \
+    -D "image_tag=latest"
+```
+
+---
+
+## Other Deployment Options
+
+| Path | Best For | Documentation |
+|------|----------|---------------|
 | **CLI Quickstart** | Interactive guided deployment | `./scripts/quick_deploy.sh` |
-| **SQL Scripts** | Step-by-step manual control | Run scripts in `scripts/sql/` in order |
-| **Snowflake CLI** | Modern CLI-based deployment | `snow spcs service deploy flux_data_forge` |
-| **Terraform** | Infrastructure-as-Code, CI/CD | `cd terraform && terraform apply` |
-| **Git Integration** | Deploy from Snowflake UI | See `git_deploy/README.md` |
+| **Terraform** | Infrastructure-as-Code, CI/CD | [terraform/README.md](terraform/README.md) |
+| **Git Integration** | Deploy from Snowflake UI | [git_deploy/README.md](git_deploy/README.md) |
 
-### Quick Comparison
+### Terraform Deployment
 
-- **New to SPCS?** Start with CLI Quickstart (`./scripts/quick_deploy.sh`)
-- **Want full control?** Use numbered SQL scripts in `scripts/sql/`
-- **Using CI/CD?** Use Terraform or Snowflake CLI with `snowflake.yml`
-- **Deploying from Snowflake?** Use Git Integration
+```bash
+cd terraform
+cp terraform.tfvars.example terraform.tfvars
+# Edit terraform.tfvars with your values
+terraform init
+terraform apply
+```
 
 ---
 
 ## Features
 
-- **Batch Generation**: Generate historical AMI datasets (7 days to 1 year)
-- **Real-Time Streaming**: Sub-5-second latency using Snowpipe Streaming SDK
-- **Multiple Data Flows**:
-  - Snowflake Table (scheduled via Tasks)
-  - Snowflake Table (real-time streaming)
-  - S3 External Stage (medallion architecture)
-  - Dual Write (Snowflake + Postgres)
-- **Realistic Patterns**: Time-of-day usage curves, customer segments, voltage anomalies, outage signals
-- **Scale Presets**: Quick Demo (67K rows) → ML Training (350M rows)
+### Batch Generation
+Generate historical AMI datasets from 7 days to 1 year of data.
+
+### Real-Time Streaming
+Sub-5-second latency using Snowpipe Streaming SDK for live data feeds.
+
+### Multiple Data Flows
+- **Snowflake Table**: Direct writes (scheduled or streaming)
+- **S3 External Stage**: Medallion architecture support
+- **Dual Write**: Simultaneous Snowflake + Postgres
+
+### Realistic Patterns
+- Time-of-day usage curves
+- Customer segment behaviors
+- Voltage anomalies
+- Outage signals
+
+### Scale Presets
+
+| Template | Meters | Days | Rows | Generation Time | Use Case |
+|----------|--------|------|------|-----------------|----------|
+| Quick Demo | 100 | 7 | 67K | ~5 min | Fast demos, testing |
+| SE Demo | 1,000 | 90 | 8.6M | ~30 min | Cortex Analyst demos |
+| Enterprise POC | 5,000 | 180 | 86M | ~3 hours | Enterprise evaluations |
+| ML Training | 10,000 | 365 | 350M | ~12 hours | ML model training |
+
+---
+
+## Data Schema
+
+The generated AMI data includes:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `METER_ID` | VARCHAR | Unique meter identifier |
+| `READING_TIMESTAMP` | TIMESTAMP_NTZ | Reading timestamp (15-min intervals) |
+| `USAGE_KWH` | FLOAT | Energy consumption |
+| `VOLTAGE` | FLOAT | Voltage reading |
+| `TRANSFORMER_ID` | VARCHAR | Associated transformer |
+| `CIRCUIT_ID` | VARCHAR | Associated circuit |
+| `SUBSTATION_ID` | VARCHAR | Associated substation |
+| `CUSTOMER_SEGMENT` | VARCHAR | RESIDENTIAL / COMMERCIAL / INDUSTRIAL |
+| `SERVICE_AREA` | VARCHAR | Geographic service territory |
+| `IS_OUTAGE` | BOOLEAN | Outage indicator |
+| `DATA_QUALITY` | VARCHAR | VALID / ESTIMATED / OUTAGE |
+
+---
 
 ## Architecture
 
@@ -83,109 +352,50 @@ flowchart TB
     STREAM --> PG
 ```
 
-## Prerequisites
+---
 
-- Snowflake account with SPCS enabled
-- ACCOUNTADMIN role (or equivalent permissions)
-- Docker installed locally (for building images)
+## Troubleshooting
 
-## Quick Start
+| Issue | Solution |
+|-------|----------|
+| Docker build fails | Ensure Docker Desktop is running |
+| Image push fails | Verify you ran `docker login` first |
+| Compute pool stuck | Wait 2-3 min, check with `DESCRIBE COMPUTE POOL` |
+| Service won't start | Check `SYSTEM$GET_SERVICE_STATUS` for error details |
+| No data in table | Verify service is READY, check UI for generation status |
+| "Unknown variable" error | You're missing a `-D "variable=value"` argument |
 
-### Option A: Use Prebuilt Image (Recommended)
+See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for detailed solutions.
 
-Pull the prebuilt image from GitHub Container Registry:
+---
 
-```bash
-# Pull latest image
-docker pull ghcr.io/sfc-gh-abannerjee/flux-data-forge:latest
+## Project Structure
 
-# Tag for your Snowflake registry
-docker tag ghcr.io/sfc-gh-abannerjee/flux-data-forge:latest \
-  <YOUR_ORG>-<YOUR_ACCOUNT>.registry.snowflakecomputing.com/<DB>/<SCHEMA>/<REPO>/flux_data_forge:latest
-
-# Login and push to Snowflake
-docker login <YOUR_ORG>-<YOUR_ACCOUNT>.registry.snowflakecomputing.com
-docker push <YOUR_ORG>-<YOUR_ACCOUNT>.registry.snowflakecomputing.com/<DB>/<SCHEMA>/<REPO>/flux_data_forge:latest
+```
+flux-data-forge/
+├── README.md                   # This file
+├── scripts/
+│   ├── quick_deploy.sh         # Interactive CLI deployment
+│   └── sql/                    # SQL deployment scripts
+│       ├── 00_standalone_quickstart.sql  # Standalone (no dependencies)
+│       ├── 01_database_schema.sql
+│       ├── 02_image_repository.sql
+│       ├── 03_compute_pool.sql
+│       ├── 04_target_table.sql
+│       ├── 05_create_service.sql
+│       └── 06_validation.sql
+├── spcs_app/
+│   ├── fastapi_app.py          # Main FastAPI application
+│   ├── Dockerfile              # Container definition
+│   ├── requirements.txt        # Python dependencies
+│   └── service_spec.yaml       # SPCS service specification
+├── terraform/                  # Terraform IaC deployment
+├── git_deploy/                 # Git integration deployment
+├── tests/                      # Test suite
+└── docs/                       # Documentation
 ```
 
-Then skip to [Step 3: Deploy to SPCS](#3-deploy-to-spcs).
-
-### Option B: Build from Source
-
-#### 1. Clone and Configure
-
-```bash
-git clone https://github.com/sfc-gh-abannerjee/flux-data-forge.git
-cd flux-data-forge
-```
-
-Copy and edit the environment template:
-```bash
-cp .env.example .env
-# Edit .env with your Snowflake configuration
-```
-
-Update deployment files in `spcs_app/`:
-- `build_and_push.sh` - Set your registry URL
-- `deploy_spcs.sql` - Set configuration variables (database, schema, compute pool)
-
-#### 2. Build and Push Docker Image
-
-```bash
-cd spcs_app
-
-# Login to Snowflake registry
-docker login <YOUR_ORG>-<YOUR_ACCOUNT>.registry.snowflakecomputing.com
-
-# Build and push
-./build_and_push.sh
-```
-
-### 3. Deploy to SPCS
-
-Run `deploy_spcs.sql` in Snowflake Worksheets:
-
-```sql
--- 1. First, update the configuration variables at the top
--- 2. Run the PRE-FLIGHT CHECKS section to validate your environment
--- 3. If checks pass, run the remaining sections
-```
-
-### 4. Verify Deployment
-
-```sql
--- Check service is running
-SELECT SYSTEM$GET_SERVICE_STATUS('FLUX_DATA_FORGE_SERVICE');
--- Should return: {"status":"READY",...}
-
--- Get the application URL
-SHOW ENDPOINTS IN SERVICE FLUX_DATA_FORGE_SERVICE;
--- Copy the ingress_url value
-```
-
-### 5. Validate the Application
-
-1. **Open the URL** from step 4 in your browser
-2. **Health check**: The UI should load without errors
-3. **Test generation**: 
-   - Select "Quick Demo" preset (67K rows, ~5 min)
-   - Click "Generate"
-   - Watch the progress indicator
-
-4. **Verify data landed**:
-```sql
-SELECT COUNT(*) as ROWS_GENERATED,
-       MIN(READING_TIMESTAMP) as FIRST_READING,
-       MAX(READING_TIMESTAMP) as LAST_READING,
-       COUNT(DISTINCT METER_ID) as UNIQUE_METERS
-FROM AMI_STREAMING_READINGS;
-```
-
-Expected output for Quick Demo:
-```
-ROWS_GENERATED | FIRST_READING       | LAST_READING        | UNIQUE_METERS
-67,200         | 2026-01-10 00:00:00 | 2026-01-16 23:45:00 | 100
-```
+---
 
 ## Configuration
 
@@ -200,154 +410,6 @@ See [`.env.example`](.env.example) for all available variables.
 | `SNOWFLAKE_WAREHOUSE` | Compute warehouse | Yes |
 | `SNOWFLAKE_ROLE` | Execution role | No (default: SYSADMIN) |
 | `S3_BUCKET` | S3 bucket for external staging | No |
-| `AWS_ROLE_ARN` | IAM role for S3 access | No |
-
-### Secrets (for Advanced Features)
-
-Create these Snowflake secrets if using optional features:
-
-```sql
--- For Snowpipe Streaming SDK (key-pair auth)
-CREATE SECRET streaming_key
-    TYPE = GENERIC_STRING
-    SECRET_STRING = '<your-private-key>';
-
--- For Postgres dual-write
-CREATE SECRET postgres_credentials
-    TYPE = PASSWORD
-    USERNAME = 'application'
-    PASSWORD = '<your-password>';
-
--- For S3 external staging
-CREATE SECRET aws_credentials
-    TYPE = PASSWORD
-    USERNAME = '<aws-access-key-id>'
-    PASSWORD = '<aws-secret-access-key>';
-```
-
-## Use Case Templates
-
-| Template | Meters | Days | Rows | Generation Time | Use Case |
-|----------|--------|------|------|-----------------|----------|
-| Quick Demo | 100 | 7 | 67K | ~5 min | Fast demos, testing |
-| SE Demo | 1,000 | 90 | 8.6M | ~30 min | Cortex Analyst demos |
-| Enterprise POC | 5,000 | 180 | 86M | ~3 hours | Enterprise evaluations |
-| ML Training | 10,000 | 365 | 350M | ~12 hours | ML model training |
-
-## Data Schema
-
-The generated AMI data includes:
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `METER_ID` | VARCHAR | Unique meter identifier |
-| `READING_TIMESTAMP` | TIMESTAMP_NTZ | Reading timestamp (15-min intervals) |
-| `USAGE_KWH` | FLOAT | Energy consumption |
-| `VOLTAGE` | FLOAT | Voltage reading |
-| `TRANSFORMER_ID` | VARCHAR | Associated transformer |
-| `CIRCUIT_ID` | VARCHAR | Associated circuit |
-| `SUBSTATION_ID` | VARCHAR | Associated substation |
-| `CUSTOMER_SEGMENT` | VARCHAR | RESIDENTIAL / COMMERCIAL / INDUSTRIAL |
-| `SERVICE_AREA` | VARCHAR | Geographic service territory |
-| `IS_OUTAGE` | BOOLEAN | Outage indicator |
-| `DATA_QUALITY` | VARCHAR | VALID / ESTIMATED / OUTAGE |
-
-## File Structure
-
-```
-flux-data-forge/
-├── README.md               # This file
-├── LICENSE                 # Apache 2.0 license
-├── SECURITY.md             # Security model and RBAC
-├── CONTRIBUTING.md         # Contribution guidelines
-├── snowflake.yml           # Snowflake CLI project definition
-├── .env.example            # Environment variable template
-├── .gitignore              # Git ignore rules
-├── .github/
-│   └── workflows/
-│       └── ci.yml          # CI/CD pipeline (lint, test, build, deploy)
-├── spcs_app/
-│   ├── fastapi_app.py      # Main FastAPI application
-│   ├── snowpipe_streaming_impl.py  # Snowpipe Streaming SDK wrapper
-│   ├── Dockerfile          # Container definition
-│   ├── requirements.txt    # Python dependencies
-│   ├── service_spec.yaml   # SPCS service specification template
-│   ├── deploy_spcs.sql     # Single-file deployment script
-│   └── build_and_push.sh   # Docker build automation
-├── scripts/
-│   ├── quick_deploy.sh     # Interactive CLI deployment
-│   └── sql/                # Modular SQL deployment scripts
-│       ├── README.md       # SQL scripts documentation
-│       ├── 01_database_schema.sql
-│       ├── 02_image_repository.sql
-│       ├── 03_compute_pool.sql
-│       ├── 04_target_table.sql
-│       ├── 05_create_service.sql
-│       └── 06_validation.sql
-├── terraform/
-│   ├── main.tf             # Infrastructure resources
-│   ├── variables.tf        # Input variables
-│   ├── outputs.tf          # Output values
-│   ├── terraform.tfvars.example  # Example configuration
-│   └── README.md           # Terraform usage guide
-├── git_deploy/
-│   ├── README.md           # Git integration documentation
-│   ├── setup_git_integration.sql
-│   └── deploy_from_git.sql
-├── tests/
-│   ├── smoke_test.py       # Quick validation tests
-│   └── test_unit.py        # Unit tests (pytest)
-└── docs/
-    ├── ARCHITECTURE.md     # System diagrams (Mermaid)
-    ├── SAMPLE_QUERIES.md   # Deployment validation queries
-    └── TROUBLESHOOTING.md  # Common issues and solutions
-```
-
-## Troubleshooting
-
-See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for common issues:
-
-- Service won't start
-- Image push fails
-- Permission errors
-- No data in target table
-- S3/Postgres integration issues
-
-## Snowflake Documentation
-
-### Core Technologies
-
-| Technology | Description | Documentation |
-|------------|-------------|---------------|
-| **Snowpark Container Services** | Run containers in Snowflake | [SPCS Overview](https://docs.snowflake.com/en/developer-guide/snowpark-container-services/overview) |
-| **Snowpipe Streaming** | Real-time data ingestion (<5 sec latency) | [Snowpipe Streaming](https://docs.snowflake.com/en/user-guide/data-load-snowpipe-streaming-overview) |
-| **Image Repository** | Store Docker images in Snowflake | [Image Repository](https://docs.snowflake.com/en/developer-guide/snowpark-container-services/working-with-registry-repository) |
-| **Compute Pool** | SPCS compute resources | [Compute Pool](https://docs.snowflake.com/en/developer-guide/snowpark-container-services/working-with-compute-pool) |
-
-### Data Pipeline Components
-
-| Component | Use Case | Documentation |
-|-----------|----------|---------------|
-| **External Stages** | S3/Azure/GCS integration | [External Stages](https://docs.snowflake.com/en/user-guide/data-load-s3-create-stage) |
-| **Storage Integration** | Secure cloud storage access | [Storage Integration](https://docs.snowflake.com/en/sql-reference/sql/create-storage-integration) |
-| **Snowpipe** | Auto-ingest from stages | [Snowpipe](https://docs.snowflake.com/en/user-guide/data-load-snowpipe-intro) |
-| **Tasks** | Scheduled SQL execution | [Tasks](https://docs.snowflake.com/en/user-guide/tasks-intro) |
-| **Dynamic Tables** | Declarative data pipelines | [Dynamic Tables](https://docs.snowflake.com/en/user-guide/dynamic-tables-about) |
-
-### Security & Access
-
-| Topic | Documentation |
-|-------|---------------|
-| **Secrets** | [CREATE SECRET](https://docs.snowflake.com/en/sql-reference/sql/create-secret) |
-| **External Access Integration** | [External Network Access](https://docs.snowflake.com/en/developer-guide/external-network-access/external-network-access-overview) |
-| **Service Roles** | [SPCS Service Roles](https://docs.snowflake.com/en/developer-guide/snowpark-container-services/additional-considerations-services-jobs#service-roles) |
-
-### Terraform
-
-| Resource | Documentation |
-|----------|---------------|
-| **Snowflake Provider** | [Terraform Provider](https://registry.terraform.io/providers/Snowflake-Labs/snowflake/latest/docs) |
-| **Compute Pool Resource** | [snowflake_compute_pool](https://registry.terraform.io/providers/Snowflake-Labs/snowflake/latest/docs/resources/compute_pool) |
 
 ---
 
@@ -355,10 +417,23 @@ See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for common issues:
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and contribution guidelines.
 
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+---
+
 ## License
 
 This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
-## Support
+---
 
-For issues or feature requests, open an issue in this repository.
+## Acknowledgments
+
+Built with [Snowflake](https://www.snowflake.com/) technologies:
+- Snowpark Container Services (SPCS)
+- Snowpipe Streaming SDK
+- Dynamic Tables

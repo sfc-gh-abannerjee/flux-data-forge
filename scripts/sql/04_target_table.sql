@@ -3,16 +3,19 @@
 -- =============================================================================
 -- Creates the AMI_STREAMING_READINGS table where generated data lands.
 --
--- Prerequisites:
---   - Run 01_database_schema.sql first
+-- Variables (Jinja2 syntax for Snow CLI):
+--   <% database %>  - Target database name
+--   <% schema %>    - Schema name (default: PUBLIC)
+--
+-- Usage:
+--   snow sql -f scripts/sql/04_target_table.sql \
+--       -D "database=FLUX_DATA_FORGE" \
+--       -D "schema=PUBLIC" \
+--       -c your_connection_name
 -- =============================================================================
 
--- Configuration
-SET database_name = 'FLUX_DATA_FORGE';
-SET schema_name = 'PUBLIC';
-
-USE DATABASE IDENTIFIER($database_name);
-USE SCHEMA IDENTIFIER($schema_name);
+USE DATABASE IDENTIFIER('<% database %>');
+USE SCHEMA IDENTIFIER('<% schema %>');
 
 -- Create target table for streaming AMI data
 CREATE TABLE IF NOT EXISTS AMI_STREAMING_READINGS (
@@ -69,7 +72,7 @@ CLUSTER BY (DATE_TRUNC('DAY', READING_TIMESTAMP), METER_ID)
 -- 7-day time travel for recovery
 DATA_RETENTION_TIME_IN_DAYS = 7
 -- Enable change tracking for streams/CDC
-CHANGE_TRACKING = ON
+CHANGE_TRACKING = TRUE
 COMMENT = 'Streaming landing table for AMI data from Flux Data Forge';
 
 -- Verify table creation

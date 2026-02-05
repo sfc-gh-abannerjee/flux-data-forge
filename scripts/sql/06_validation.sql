@@ -3,33 +3,41 @@
 -- =============================================================================
 -- Run these queries to validate your deployment is working correctly.
 --
+-- Variables (Jinja2 syntax for Snow CLI):
+--   <% database %>       - Target database name
+--   <% schema %>         - Schema name (default: PUBLIC)
+--   <% service_name %>   - SPCS service name
+--   <% compute_pool %>   - Compute pool name
+--
+-- Usage:
+--   snow sql -f scripts/sql/06_validation.sql \
+--       -D "database=FLUX_DATA_FORGE" \
+--       -D "schema=PUBLIC" \
+--       -D "service_name=FLUX_DATA_FORGE_SERVICE" \
+--       -D "compute_pool=FLUX_DATA_FORGE_POOL" \
+--       -c your_connection_name
+--
 -- Prerequisites:
 --   - All previous scripts (01-05) completed
 --   - Service is in READY state
 --   - You've generated some test data via the UI
 -- =============================================================================
 
--- Configuration
-SET database_name = 'FLUX_DATA_FORGE';
-SET schema_name = 'PUBLIC';
-SET service_name = 'FLUX_DATA_FORGE_SERVICE';
-SET compute_pool_name = 'FLUX_DATA_FORGE_POOL';
-
-USE DATABASE IDENTIFIER($database_name);
-USE SCHEMA IDENTIFIER($schema_name);
+USE DATABASE IDENTIFIER('<% database %>');
+USE SCHEMA IDENTIFIER('<% schema %>');
 
 -- =============================================================================
 -- 1. SERVICE HEALTH CHECK
 -- =============================================================================
 
 -- Check service status (should be READY)
-SELECT SYSTEM$GET_SERVICE_STATUS($service_name) as SERVICE_STATUS;
+SELECT SYSTEM$GET_SERVICE_STATUS('<% service_name %>') as SERVICE_STATUS;
 
 -- Get service endpoints
-SHOW ENDPOINTS IN SERVICE IDENTIFIER($service_name);
+SHOW ENDPOINTS IN SERVICE IDENTIFIER('<% service_name %>');
 
 -- View recent service logs (useful for debugging)
--- CALL SYSTEM$GET_SERVICE_LOGS($service_name, '0', 'flux-data-forge', 50);
+-- CALL SYSTEM$GET_SERVICE_LOGS('<% service_name %>', '0', 'flux-data-forge', 50);
 
 -- =============================================================================
 -- 2. DATA VALIDATION
@@ -64,10 +72,10 @@ LIMIT 10;
 -- =============================================================================
 
 -- Compute pool status
-DESCRIBE COMPUTE POOL IDENTIFIER($compute_pool_name);
+DESCRIBE COMPUTE POOL IDENTIFIER('<% compute_pool %>');
 
 -- Image repository
-SHOW IMAGE REPOSITORIES LIKE 'FLUX_DATA_FORGE_REPO';
+SHOW IMAGE REPOSITORIES;
 
 -- =============================================================================
 -- 4. SAMPLE ANALYTICS QUERIES
@@ -103,4 +111,4 @@ ORDER BY TOTAL_USAGE_KWH DESC;
 SELECT 
     'Validation Complete' as STATUS,
     (SELECT COUNT(*) FROM AMI_STREAMING_READINGS) as TOTAL_ROWS,
-    (SELECT SYSTEM$GET_SERVICE_STATUS($service_name)) as SERVICE_STATUS;
+    (SELECT SYSTEM$GET_SERVICE_STATUS('<% service_name %>')) as SERVICE_STATUS;

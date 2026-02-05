@@ -1,6 +1,6 @@
 # Flux Data Forge - SQL Deployment Scripts
 
-This directory contains modular SQL scripts for deploying Flux Data Forge to Snowflake SPCS.
+Deploy Flux Data Forge to Snowflake SPCS using Snow CLI with variable templating.
 
 ## Script Order
 
@@ -15,21 +15,57 @@ Run these scripts in order:
 | `05_create_service.sql` | Deploy the SPCS service | Scripts 01-04 + Docker image pushed |
 | `06_validation.sql` | Validate deployment | All scripts + data generated |
 
-## Quick Deployment
+## Quick Start
 
-### Option 1: Run All Scripts
+```bash
+# Set your connection
+export CONN="your_connection_name"
 
-```sql
--- In Snowflake Worksheets, run each script in order
--- Scripts 01-04 can be run immediately
--- Before script 05, you must push the Docker image
+# 1. Create database and schema
+snow sql -c $CONN -f scripts/sql/01_database_schema.sql \
+    -D "database=FLUX_DATA_FORGE" \
+    -D "schema=PUBLIC" \
+    -D "warehouse=FLUX_DATA_FORGE_WH"
+
+# 2. Create image repository
+snow sql -c $CONN -f scripts/sql/02_image_repository.sql \
+    -D "database=FLUX_DATA_FORGE" \
+    -D "schema=PUBLIC" \
+    -D "image_repo=FLUX_DATA_FORGE_REPO"
+
+# 3. Create compute pool
+snow sql -c $CONN -f scripts/sql/03_compute_pool.sql \
+    -D "compute_pool=FLUX_DATA_FORGE_POOL" \
+    -D "instance_family=CPU_X64_S" \
+    -D "min_nodes=1" \
+    -D "max_nodes=2"
+
+# 4. Create target table
+snow sql -c $CONN -f scripts/sql/04_target_table.sql \
+    -D "database=FLUX_DATA_FORGE" \
+    -D "schema=PUBLIC"
+
+# 5. Push Docker image (see below)
+
+# 6. Create service
+snow sql -c $CONN -f scripts/sql/05_create_service.sql \
+    -D "database=FLUX_DATA_FORGE" \
+    -D "schema=PUBLIC" \
+    -D "warehouse=FLUX_DATA_FORGE_WH" \
+    -D "compute_pool=FLUX_DATA_FORGE_POOL" \
+    -D "image_repo=FLUX_DATA_FORGE_REPO" \
+    -D "service_name=FLUX_DATA_FORGE_SERVICE" \
+    -D "image_tag=latest"
+
+# 7. Validate
+snow sql -c $CONN -f scripts/sql/06_validation.sql \
+    -D "database=FLUX_DATA_FORGE" \
+    -D "schema=PUBLIC" \
+    -D "service_name=FLUX_DATA_FORGE_SERVICE" \
+    -D "compute_pool=FLUX_DATA_FORGE_POOL"
 ```
 
-### Option 2: Use the Single Deployment Script
-
-For convenience, the original `../spcs_app/deploy_spcs.sql` contains all steps in one file.
-
-## Between Script 04 and 05: Push Docker Image
+## Push Docker Image (Between Steps 4 and 6)
 
 After creating the image repository (script 02), push the Docker image:
 
@@ -49,16 +85,20 @@ docker tag flux_data_forge:latest <repository_url>/flux_data_forge:latest
 docker push <repository_url>/flux_data_forge:latest
 ```
 
-## Customization
+## Variable Reference
 
-Each script has configuration variables at the top. Update these before running:
-
-```sql
--- Example from 01_database_schema.sql
-SET database_name = 'MY_DATABASE';
-SET schema_name = 'MY_SCHEMA';
-SET warehouse_name = 'MY_WAREHOUSE';
-```
+| Variable | Description | Example Values |
+|----------|-------------|----------------|
+| `database` | Target database name | `FLUX_DATA_FORGE` |
+| `schema` | Schema name | `PUBLIC` |
+| `warehouse` | Warehouse name | `FLUX_DATA_FORGE_WH` |
+| `image_repo` | Image repository name | `FLUX_DATA_FORGE_REPO` |
+| `compute_pool` | Compute pool name | `FLUX_DATA_FORGE_POOL` |
+| `service_name` | SPCS service name | `FLUX_DATA_FORGE_SERVICE` |
+| `instance_family` | Compute instance type | `CPU_X64_S`, `CPU_X64_M` |
+| `min_nodes` | Minimum compute nodes | `1` |
+| `max_nodes` | Maximum compute nodes | `2` |
+| `image_tag` | Docker image tag | `latest` |
 
 ## Troubleshooting
 

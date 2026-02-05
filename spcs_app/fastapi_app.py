@@ -14,6 +14,9 @@ from contextlib import asynccontextmanager
 import json
 import io
 
+# Import centralized configuration
+from config import DB, SCHEMA_PRODUCTION, SCHEMA_APPLICATIONS, get_table_path
+
 from fastapi import FastAPI, Request, Form, HTTPException, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 import base64
@@ -45,7 +48,7 @@ snowflake_session: Optional[Session] = None
 active_streaming_jobs = {}  # job_id -> {thread, status, config, stats}
 streaming_lock = threading.Lock()
 
-# FDE PATTERN: Dependency cache for background preloading
+# PATTERN: Dependency cache for background preloading
 # Loads tables, pipes, stages on app startup to improve UX
 dependency_cache = {
     'tables': None,       # Cached bronze tables
@@ -78,7 +81,7 @@ FLEET_PRESETS = {
 PRODUCTION_DATA_SOURCES = {
     'METER_INFRASTRUCTURE': {
         'name': 'Meter Infrastructure',
-        'table': 'SI_DEMOS.PRODUCTION.METER_INFRASTRUCTURE',
+        'table': f'{DB}.{SCHEMA_PRODUCTION}.METER_INFRASTRUCTURE',
         'meter_col': 'METER_ID',
         'transformer_col': 'TRANSFORMER_ID',
         'circuit_col': 'CIRCUIT_ID',
@@ -91,7 +94,7 @@ PRODUCTION_DATA_SOURCES = {
     },
     'AMI_METADATA_SEARCH': {
         'name': 'AMI Metadata',
-        'table': 'SI_DEMOS.PRODUCTION.AMI_METADATA_SEARCH',
+        'table': f'{DB}.{SCHEMA_PRODUCTION}.AMI_METADATA_SEARCH',
         'meter_col': 'METER_ID',
         'transformer_col': 'TRANSFORMER_ID',
         'circuit_col': 'CIRCUIT_ID',
@@ -290,8 +293,8 @@ def create_snowflake_session() -> Session:
             'account': os.getenv('SNOWFLAKE_ACCOUNT'),
             'authenticator': 'oauth',
             'token': get_login_token(),
-            'warehouse': os.getenv('SNOWFLAKE_WAREHOUSE', 'SI_DEMO_WH'),
-            'database': os.getenv('SNOWFLAKE_DATABASE', 'SI_DEMOS'),
+            'warehouse': os.getenv('SNOWFLAKE_WAREHOUSE', 'FLUX_WH'),
+            'database': os.getenv('SNOWFLAKE_DATABASE', 'FLUX_DB'),
             'schema': os.getenv('SNOWFLAKE_SCHEMA', 'PRODUCTION'),
         }
         conn = snowflake.connector.connect(**creds)
@@ -409,7 +412,7 @@ def snowpipe_streaming_worker(job_id: str, config: dict):
     service_area = config.get('service_area', 'TEXAS_GULF_COAST')
     emission_pattern = config.get('emission_pattern', 'STAGGERED_REALISTIC')
     production_source = config.get('production_source', 'SYNTHETIC')
-    target_table = config.get('target_table', 'SI_DEMOS.PRODUCTION.AMI_STREAMING_DATA')
+    target_table = config.get('target_table', f'{DB}.{SCHEMA_PRODUCTION}.AMI_STREAMING_DATA')
     
     # Initialize stats
     stats = {
@@ -781,7 +784,7 @@ def internal_stage_streaming_worker(job_id: str, config: dict):
     """
     Background worker that streams raw AMI JSON files to Snowflake internal stages.
     
-    FDE PERSPECTIVE (CenterPoint Energy / Daniel Use Case):
+    UTILITY PERSPECTIVE:
     This simulates how raw AMI data from smart meters lands in a staging area
     before being processed through the medallion architecture (bronze → silver → gold).
     
@@ -805,7 +808,7 @@ def internal_stage_streaming_worker(job_id: str, config: dict):
     service_area = config.get('service_area', 'TEXAS_GULF_COAST')
     emission_pattern = config.get('emission_pattern', 'STAGGERED_REALISTIC')
     production_source = config.get('production_source', 'SYNTHETIC')
-    stage_name = config.get('stage_name', 'SI_DEMOS.PRODUCTION.STG_AMI_RAW_JSON')
+    stage_name = config.get('stage_name', f'{DB}.{SCHEMA_PRODUCTION}.STG_AMI_RAW_JSON')
     file_format = config.get('stage_file_format', 'json')
     
     # Initialize stats
@@ -903,7 +906,7 @@ def internal_stage_streaming_worker(job_id: str, config: dict):
                 meter = random.choice(meter_fleet)
                 reading = generate_ami_reading(meter, service_area, emission_pattern)
                 
-                # Build raw JSON record (FDE: This mirrors real AMI JSON from meters)
+                # Build raw JSON record ( This mirrors real AMI JSON from meters)
                 json_record = {
                     'header': {
                         'source_system': 'AMI_HEAD_END',
@@ -997,9 +1000,9 @@ def external_stage_streaming_worker(job_id: str, config: dict):
     """
     Background worker that streams raw AMI JSON files to Snowflake external stages (S3/Azure/GCS).
     
-    FDE PERSPECTIVE (CenterPoint Energy / Daniel Use Case):
+    UTILITY PERSPECTIVE:
     This simulates how raw AMI data from smart meters lands in customer-managed cloud storage
-    (e.g., CNP's own S3 bucket) before being ingested by Snowflake via external stage + Snowpipe.
+    (e.g., customer S3 bucket) before being ingested by Snowflake via external stage + Snowpipe.
     
     Real-world flow:
     Smart Meters → Customer Data Collector → S3/Azure → External Stage → Snowpipe → Bronze Table
@@ -1058,14 +1061,14 @@ def external_stage_streaming_worker(job_id: str, config: dict):
             active_streaming_jobs[job_id]['stats'] = stats
             active_streaming_jobs[job_id]['status'] = 'RUNNING'
     
-    # FDE PATTERN: Discover pipes that reference this stage for auto-refresh
+    # PATTERN: Discover pipes that reference this stage for auto-refresh
     # Without S3 event notifications, Snowpipe won't detect new files
     # We trigger ALTER PIPE REFRESH periodically to ensure data flows through
     associated_pipes = []
     try:
         session = get_valid_session()
         if session:
-            for schema_path in ["SI_DEMOS.PRODUCTION", "SI_DEMOS.DEV"]:
+            for schema_path in [f"{DB}.PRODUCTION", f"{DB}.DEV"]:
                 try:
                     result = session.sql(f"SHOW PIPES IN SCHEMA {schema_path}").collect()
                     for row in result:
@@ -1082,7 +1085,7 @@ def external_stage_streaming_worker(job_id: str, config: dict):
     except Exception as e:
         logger.warning(f"Job {job_id}: Could not discover associated pipes: {e}")
     
-    # FDE: Track refresh state
+    #  Track refresh state
     files_since_last_refresh = 0
     REFRESH_EVERY_N_FILES = 5  # Refresh pipes every N files written
     
@@ -1328,7 +1331,7 @@ def external_stage_streaming_worker(job_id: str, config: dict):
                 
                 logger.info(f"Job {job_id}: Wrote {len(records)} records to s3://{s3_bucket}/{s3_key}")
                 
-                # FDE PATTERN: Trigger pipe refresh after every N files
+                # PATTERN: Trigger pipe refresh after every N files
                 # This ensures data flows through Snowpipe without relying on S3 event notifications
                 files_since_last_refresh += 1
                 if associated_pipes and files_since_last_refresh >= REFRESH_EVERY_N_FILES:
@@ -1366,7 +1369,7 @@ def external_stage_streaming_worker(job_id: str, config: dict):
 
 def preload_dependencies_background():
     """
-    FDE PATTERN: Background preloading of dependencies on app startup.
+    PATTERN: Background preloading of dependencies on app startup.
     Caches tables, pipes, stages to improve UX when user navigates to pipeline steps.
     Runs in a background thread to not block app startup.
     """
@@ -1384,7 +1387,7 @@ def preload_dependencies_background():
         try:
             pipes = []
             seen_pipes = set()
-            schemas_to_check = ["SI_DEMOS.PRODUCTION", "SI_DEMOS.DEV"]
+            schemas_to_check = [f"{DB}.PRODUCTION", f"{DB}.DEV"]
             
             for schema_path in schemas_to_check:
                 try:
@@ -1467,12 +1470,12 @@ def preload_dependencies_background():
         
         # Preload bronze tables
         try:
-            result = session.sql("""
+            result = session.sql(f"""
                 SELECT table_catalog, table_schema, table_name, row_count, bytes
                 FROM SNOWFLAKE.ACCOUNT_USAGE.TABLES 
                 WHERE DELETED IS NULL 
                 AND table_schema IN ('PRODUCTION', 'DEV')
-                AND table_catalog = 'SI_DEMOS'
+                AND table_catalog = '{DB}'
                 AND (UPPER(table_name) LIKE '%BRONZE%' OR UPPER(table_name) LIKE '%RAW%' OR UPPER(table_name) LIKE '%AMI%')
                 ORDER BY table_schema, table_name
             """).collect()
@@ -1516,14 +1519,14 @@ async def lifespan(app: FastAPI):
     snowflake_session = create_snowflake_session()
     logger.info("Snowflake connected!")
     
-    # FDE: Reconcile stale job states on startup
+    #  Reconcile stale job states on startup
     # Jobs marked as RUNNING in DB are stale if they're not in our active_streaming_jobs
     # This happens when the service restarts - in-memory jobs are lost but DB state persists
     try:
         if snowflake_session:
             logger.info("Reconciling stale streaming job states...")
-            reconcile_result = snowflake_session.sql("""
-                UPDATE SI_DEMOS.PRODUCTION.STREAMING_JOBS 
+            reconcile_result = snowflake_session.sql(f"""
+                UPDATE {DB}.{SCHEMA_PRODUCTION}.STREAMING_JOBS 
                 SET STATUS = 'STALE', 
                     UPDATED_AT = CURRENT_TIMESTAMP()
                 WHERE STATUS = 'RUNNING'
@@ -1532,7 +1535,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Could not reconcile stale jobs: {e}")
     
-    # FDE: Start background preloading of dependencies (tables, pipes, stages)
+    #  Start background preloading of dependencies (tables, pipes, stages)
     # This improves UX by having data ready when user navigates to pipeline steps
     try:
         preload_thread = threading.Thread(target=preload_dependencies_background, daemon=True)
@@ -1553,7 +1556,7 @@ app = FastAPI(title="FLUX Data Forge", version="5.0", lifespan=lifespan)
 @app.get("/api/cache/status")
 async def get_cache_status():
     """
-    FDE: Check the status of the dependency cache for debugging.
+     Check the status of the dependency cache for debugging.
     Returns what has been preloaded and when.
     """
     with dependency_cache['lock']:
@@ -2461,7 +2464,7 @@ def get_header_html():
 def get_status_bar_html():
     env_info = {
         "account": os.getenv('SNOWFLAKE_ACCOUNT', 'N/A'),
-        "database": os.getenv('SNOWFLAKE_DATABASE', 'SI_DEMOS'),
+        "database": os.getenv('SNOWFLAKE_DATABASE', 'FLUX_DB'),
         "schema": os.getenv('SNOWFLAKE_SCHEMA', 'PRODUCTION'),
     }
     return f"""
@@ -2876,7 +2879,7 @@ async def generate_page(
             resultsDiv.style.display = 'block';
             tableContainer.innerHTML = '';
             
-            // FDE Insight: Dynamic loading stages make wait times feel productive
+            // Insight: Dynamic loading stages make wait times feel productive
             // Show users what's happening in the data pipeline - builds confidence
             const loadingStages = [
                 {{ icon: 'cloud_download', msg: `Connecting to production source...`, detail: source }},
@@ -3268,7 +3271,7 @@ async def generate_page(
                     </label>
                 </div>
             </div>
-            <input type="hidden" name="table" id="full_table_path" value="SI_DEMOS.PRODUCTION.AMI_INTERVAL_READINGS">
+            <input type="hidden" name="table" id="full_table_path" value="{DB}.{SCHEMA_PRODUCTION}.AMI_INTERVAL_READINGS">
             
             <div class="form-row" style="grid-template-columns: 1fr 1fr;">
                 <div class="form-group">
@@ -3336,7 +3339,7 @@ async def generate_page(
                     const opt = document.createElement('option');
                     opt.value = db;
                     opt.textContent = db;
-                    if (db === 'SI_DEMOS') opt.selected = true;
+                    if (db === '{DB}') opt.selected = true;
                     select.appendChild(opt);
                 }});
                 // Load schemas for default selection
@@ -3417,7 +3420,7 @@ async def generate_page(
                 ? document.getElementById('new_table').value 
                 : document.getElementById('sf_table').value;
             
-            db = db || 'SI_DEMOS';
+            db = db || '{DB}';
             schema = schema || 'PRODUCTION';
             table = table || 'AMI_INTERVAL_READINGS';
             
@@ -3635,7 +3638,7 @@ async def generate_page(
             '''
             
             # NEW: Use horizontal 4-column accordion layout for Stage Landing Pipeline
-            # FDE Mode: Production-grade UX with conditional visibility and smart defaults
+            # Advanced Mode: Production-grade UX with conditional visibility and smart defaults
             preview_content += f'''
             <!-- ========== STAGE LANDING PIPELINE - ENTERPRISE 4-STEP LAYOUT ========== -->
             <div class="pipeline-accordion">
@@ -3726,7 +3729,7 @@ async def generate_page(
                                 → Will create: <span id="table_full_path" style="color: #38bdf8;">...</span>
                             </div>
                             
-                            <!-- FDE: Opt-in Snowpipe creation with external stage -->
+                            <!--  Opt-in Snowpipe creation with external stage -->
                             <div id="auto_pipe_option" style="margin: 8px 0; padding: 8px; background: rgba(168,85,247,0.1); border-radius: 6px; border: 1px solid rgba(168,85,247,0.3);">
                                 <label style="display: flex; align-items: flex-start; gap: 8px; cursor: pointer; font-size: 0.75rem; color: #e2e8f0;">
                                     <input type="checkbox" id="auto_create_pipe" name="auto_create_pipe" style="width: auto; margin-top: 2px;">
@@ -3776,7 +3779,7 @@ async def generate_page(
                         </div>
                         <div id="table_status" style="margin-top: 6px; font-size: 0.75rem;"></div>
                         
-                        <!-- FDE: Pipe status display after table creation -->
+                        <!--  Pipe status display after table creation -->
                         <div id="pipe_detection_status" style="display: none; margin-top: 8px; padding: 10px; border-radius: 6px; font-size: 0.75rem;"></div>
                         <div id="table_schema_preview" style="display: none; margin-top: 8px; padding: 8px; background: rgba(15,23,42,0.5); border-radius: 6px; font-family: monospace; font-size: 0.65rem; color: #94a3b8;">
                             <div style="color: #64748b; margin-bottom: 4px;">Bronze table schema:</div>
@@ -3853,7 +3856,7 @@ async def generate_page(
             </div>
             
             <script>
-            // ========== FDE MODE: ENTERPRISE PIPELINE CONFIGURATION ==========
+            // ========== ENTERPRISE PIPELINE CONFIGURATION ==========
             // Smart 4-step flow with conditional visibility and real-time summary
             
             let isExternalStage = false;  // Track stage type for conditional UI
@@ -4185,7 +4188,7 @@ async def generate_page(
                         const opt = document.createElement('option');
                         opt.value = db;
                         opt.textContent = db;
-                        if (db === 'SI_DEMOS') opt.selected = true;
+                    if (db === '{DB}') opt.selected = true;
                         select.appendChild(opt);
                     }});
                     
@@ -4242,7 +4245,7 @@ async def generate_page(
                 const statusEl = document.getElementById('table_status');
                 const pipeStatusEl = document.getElementById('pipe_detection_status');
                 
-                // FDE: Check if user opted in to auto-create pipe
+                //  Check if user opted in to auto-create pipe
                 const autoCreatePipe = document.getElementById('auto_create_pipe')?.checked || false;
                 const sourceStage = document.getElementById('pipe_source_stage')?.value || '';
                 const filePattern = document.getElementById('pipe_file_pattern')?.value || '.*ami_stream.*\\.json';
@@ -4252,7 +4255,7 @@ async def generate_page(
                     return;
                 }}
                 
-                // FDE: Validate pipe creation requirements
+                //  Validate pipe creation requirements
                 if (autoCreatePipe && !sourceStage) {{
                     if (statusEl) statusEl.innerHTML = '<span style="color: #ef4444;">Please select a source stage for the Snowpipe.</span>';
                     return;
@@ -4266,7 +4269,7 @@ async def generate_page(
                     formData.append('table_name', fullName);
                     formData.append('table_type', 'bronze_variant');
                     
-                    // FDE: Include pipe creation options if user opted in
+                    //  Include pipe creation options if user opted in
                     if (autoCreatePipe) {{
                         formData.append('create_pipe', 'true');
                         formData.append('source_stage', sourceStage);
@@ -4282,7 +4285,7 @@ async def generate_page(
                     if (data.status === 'created' || data.status === 'exists') {{
                         if (statusEl) statusEl.innerHTML = `<span style="color: #22c55e;">✓ Table <strong>${{fullName}}</strong> ready!</span>`;
                         
-                        // FDE: Show pipe status with actionable options
+                        //  Show pipe status with actionable options
                         if (pipeStatusEl) {{
                             if (data.pipe_status?.pipe_created_now) {{
                                 // Pipe was just created
@@ -4298,7 +4301,7 @@ async def generate_page(
                                     <div style="color: #64748b; font-size: 12px;">Data will auto-ingest from S3 → Table</div>
                                 `;
                                 
-                                // FDE: Refresh Step 4 pipes dropdown and auto-select the new pipe
+                                //  Refresh Step 4 pipes dropdown and auto-select the new pipe
                                 await loadPipes(data.pipe_status.pipe_name);
                             }} else if (data.pipe_status?.has_pipe) {{
                                 // Existing pipe found
@@ -4347,10 +4350,10 @@ async def generate_page(
                             }}
                         }}
                         
-                        // FDE: Immediately add the new table to dropdown (no API call delay)
+                        //  Immediately add the new table to dropdown (no API call delay)
                         addTableToDropdownAndSelect(fullName);
                         
-                        // FDE: If pipe was created, immediately add it to Step 4 dropdown
+                        //  If pipe was created, immediately add it to Step 4 dropdown
                         if (data.pipe_status?.pipe_created_now && data.pipe_status?.pipe_name) {{
                             addPipeToDropdownAndSelect(data.pipe_status.pipe_name);
                         }}
@@ -4368,7 +4371,7 @@ async def generate_page(
                 }}
             }}
             
-            // FDE: Immediately add a newly created table to dropdown without API call
+            //  Immediately add a newly created table to dropdown without API call
             function addTableToDropdownAndSelect(tableName) {{
                 const select = document.getElementById('target_table');
                 if (!select) return;
@@ -4408,7 +4411,7 @@ async def generate_page(
                 onTargetTableChange();
             }}
             
-            // FDE: Immediately add a newly created pipe to dropdown without API call
+            //  Immediately add a newly created pipe to dropdown without API call
             function addPipeToDropdownAndSelect(pipeName) {{
                 const select = document.getElementById('pipe_name');
                 if (!select) return;
@@ -4449,7 +4452,7 @@ async def generate_page(
                 select.value = shortName;
             }}
             
-            // FDE: Create pipe for an existing table (opt-in from warning)
+            //  Create pipe for an existing table (opt-in from warning)
             async function createPipeForTable(db, schema, tableName) {{
                 const stageSelect = document.getElementById('create_pipe_stage_select');
                 const patternInput = document.getElementById('create_pipe_pattern');
@@ -4493,10 +4496,10 @@ async def generate_page(
                             </div>
                         `;
                         
-                        // FDE: Immediately add pipe to dropdown (no API delay)
+                        //  Immediately add pipe to dropdown (no API delay)
                         addPipeToDropdownAndSelect(data.pipe_name);
                         
-                        // FDE: Update pipeline summary to show the new pipe
+                        //  Update pipeline summary to show the new pipe
                         updatePipelineSummary();
                     }} else {{
                         pipeStatusEl.innerHTML = `<div style="color: #ef4444;">Error: ${{data.detail || 'Failed to create pipe'}}</div>`;
@@ -4506,7 +4509,7 @@ async def generate_page(
                 }}
             }}
             
-            // FDE: Toggle pipe source stage dropdown based on checkbox
+            //  Toggle pipe source stage dropdown based on checkbox
             document.addEventListener('DOMContentLoaded', function() {{
                 const autoPipeCheckbox = document.getElementById('auto_create_pipe');
                 const pipeStageContainer = document.getElementById('pipe_source_stage_container');
@@ -4524,7 +4527,7 @@ async def generate_page(
                 }}
             }});
             
-            // FDE: Handle file pattern preset selection
+            //  Handle file pattern preset selection
             function updateFilePatternFromPreset() {{
                 const presetSelect = document.getElementById('pipe_file_pattern_preset');
                 const patternInput = document.getElementById('pipe_file_pattern');
@@ -4549,7 +4552,7 @@ async def generate_page(
                 
                 try {{
                     // Fetch external stages from PRODUCTION (shared) + current schema
-                    const resp = await fetch('/api/stages/SI_DEMOS/PRODUCTION');
+                    const resp = await fetch('/api/stages/{DB}/PRODUCTION');
                     const data = await resp.json();
                     
                     select.innerHTML = '<option value="">Select source stage...</option>';
@@ -4663,13 +4666,13 @@ async def generate_page(
                 
                 if (!previewEl) return;
                 
-                let stageName = stageSelect?.value || 'SI_DEMOS.PRODUCTION.STG_AMI_RAW';
+                let stageName = stageSelect?.value || '{DB}.PRODUCTION.STG_AMI_RAW';
                 const pipeName = pipeNameInput?.value || 'PIPE_AMI_RAW_INGEST';
                 // Use the new target_table select, fall back to legacy pipe_target_table
                 let targetTable = targetSelect?.value;
                 if (!targetTable || targetTable === '__create_new__') {{
                     const legacyInput = document.getElementById('pipe_target_table');
-                    targetTable = legacyInput?.value || 'SI_DEMOS.PRODUCTION.AMI_BRONZE_RAW';
+                    targetTable = legacyInput?.value || `${DB}.PRODUCTION.AMI_BRONZE_RAW`;
                 }}
                 const autoIngest = autoIngestCheckbox?.checked ?? true;
                 const fileFormat = (formatSelect?.value || 'json').toUpperCase();
@@ -5003,7 +5006,7 @@ FILE_FORMAT = (TYPE = ${{fileFormat}});`;
                     select.appendChild(createOpt);
                     
                     if (data.pipes && data.pipes.length > 0) {{
-                        // FDE: Group pipes by schema for better visibility
+                        //  Group pipes by schema for better visibility
                         const pipesBySchema = {{}};
                         data.pipes.forEach(pipe => {{
                             const schemaKey = `${{pipe.database}}.${{pipe.schema}}`;
@@ -5027,7 +5030,7 @@ FILE_FORMAT = (TYPE = ${{fileFormat}});`;
                             select.appendChild(pipeGroup);
                         }});
                         
-                        // FDE: Auto-select the specified pipe (e.g., newly created one)
+                        //  Auto-select the specified pipe (e.g., newly created one)
                         if (selectValue) {{
                             // Try to match by full name or just the pipe name
                             const pipeName = selectValue.includes('.') ? selectValue.split('.').pop() : selectValue;
@@ -5112,7 +5115,7 @@ FILE_FORMAT = (TYPE = ${{fileFormat}});`;
                     const opt = document.createElement('option');
                     opt.value = db;
                     opt.textContent = db;
-                    if (db === 'SI_DEMOS') opt.selected = true;
+                    if (db === '{DB}') opt.selected = true;
                     select.appendChild(opt);
                 }});
                 if (select.value) loadStreamSchemas(select.value);
@@ -5429,17 +5432,17 @@ async def monitor_page():
     tasks_html = ""
     snowpipe_html = ""
     recent_data_html = ""
-    bronze_preview_html = ""  # FDE: Live preview of bronze table ingestion
+    bronze_preview_html = ""  #  Live preview of bronze table ingestion
     pipes_info = []
     sdk_jobs = []
-    auto_select_stage = None  # FDE: For auto-selecting stage in Stage File Preview
+    auto_select_stage = None  #  For auto-selecting stage in Stage File Preview
     
     try:
         session = get_valid_session()
         if session:
             # ========== SECTION 1: SNOWFLAKE TASKS ==========
-            result = session.sql("""
-                SHOW TASKS LIKE '%AMI_STREAMING%' IN SCHEMA SI_DEMOS.PRODUCTION
+            result = session.sql(f"""
+                SHOW TASKS LIKE '%AMI_STREAMING%' IN SCHEMA {DB}.PRODUCTION
             """).collect()
             
             started_tasks = []
@@ -5465,10 +5468,10 @@ async def monitor_page():
                     suspended_tasks.append(task_info)
             
             # ========== SECTION 2: SNOWPIPE STREAMING ==========
-            # FDE: Check for pipes in BOTH PRODUCTION and DEV schemas
+            #  Check for pipes in BOTH PRODUCTION and DEV schemas
             try:
                 seen_pipes = set()
-                for schema_path in ["SI_DEMOS.PRODUCTION", "SI_DEMOS.DEV"]:
+                for schema_path in [f"{DB}.PRODUCTION", f"{DB}.DEV"]:
                     try:
                         result = session.sql(f"""
                             SHOW PIPES IN SCHEMA {schema_path}
@@ -5483,7 +5486,7 @@ async def monitor_page():
                                 definition = row_dict.get('definition', '') or ''
                                 pipes_info.append({
                                     'name': pipe_name,
-                                    'full_name': f"SI_DEMOS.{schema_name}.{pipe_name}",
+                                    'full_name': f"{DB}.{schema_name}.{pipe_name}",
                                     'schema': schema_name,
                                     'definition': definition[:100] if definition else '',
                                     'notification_channel': row_dict.get('notification_channel', ''),
@@ -5523,13 +5526,13 @@ async def monitor_page():
                         snowpipe_count += 1
             
             # Also check DB for historical jobs
-            # FDE: Jobs marked RUNNING in DB but not in memory are STALE (service restarted)
+            #  Jobs marked RUNNING in DB but not in memory are STALE (service restarted)
             try:
-                result = session.sql("""
+                result = session.sql(f"""
                     SELECT JOB_ID, MECHANISM, TARGET_TABLE, METERS, INTERVAL_MINUTES, 
                            ROWS_PER_SEC, BATCH_SIZE_MB, SERVICE_AREA, STATUS, CREATED_AT,
                            PRODUCTION_SOURCE, EMISSION_PATTERN, PRODUCTION_MATCHED
-                    FROM SI_DEMOS.PRODUCTION.STREAMING_JOBS
+                    FROM {DB}.{SCHEMA_PRODUCTION}.STREAMING_JOBS
                     ORDER BY CREATED_AT DESC
                     LIMIT 10
                 """).collect()
@@ -5540,7 +5543,7 @@ async def monitor_page():
                     if any(j['job_id'] == job_id_db for j in active_memory_jobs):
                         continue
                     
-                    # FDE: Mark DB jobs with RUNNING status as STALE since they're not in memory
+                    #  Mark DB jobs with RUNNING status as STALE since they're not in memory
                     db_status = row_dict.get('STATUS', '')
                     is_stale = db_status.upper() in ('RUNNING', 'STALE')  # RUNNING or STALE in DB but not in memory
                     display_status = 'STALE' if is_stale else db_status
@@ -5571,13 +5574,13 @@ async def monitor_page():
             for table_name in ['AMI_STREAMING_DATA', 'AMI_STREAMING_READINGS', 'AMI_STREAMING_READINGS_TEXAS_GULF_COAST', 'AMI_STREAMING_READINGS_HOUSTON_METRO']:
                 try:
                     result = session.sql(f"""
-                        SELECT COUNT(*) as cnt FROM SI_DEMOS.PRODUCTION.{table_name}
+                        SELECT COUNT(*) as cnt FROM {DB}.{SCHEMA_PRODUCTION}.{table_name}
                         WHERE CREATED_AT >= DATEADD(HOUR, -1, CURRENT_TIMESTAMP())
                     """).collect()
                     recent_rows_1h += result[0]['CNT'] if result else 0
                     
                     result = session.sql(f"""
-                        SELECT COUNT(*) as cnt FROM SI_DEMOS.PRODUCTION.{table_name}
+                        SELECT COUNT(*) as cnt FROM {DB}.{SCHEMA_PRODUCTION}.{table_name}
                     """).collect()
                     total_rows += result[0]['CNT'] if result else 0
                 except:
@@ -5657,7 +5660,7 @@ async def monitor_page():
                 </p>
             '''
             
-            # Show Pipes - FDE: Display full name with schema badge
+            # Show Pipes -  Display full name with schema badge
             if pipes_info:
                 snowpipe_html += f'<div style="margin-bottom: 16px;"><div style="color: #a855f7; font-weight: 600; margin-bottom: 8px;">Configured Pipes ({len(pipes_info)})</div>'
                 for p in pipes_info:
@@ -5677,13 +5680,13 @@ async def monitor_page():
             
             # Show SDK Jobs
             if sdk_jobs:
-                # FDE: Only truly LIVE jobs count as running (in-memory = is_live=True)
+                #  Only truly LIVE jobs count as running (in-memory = is_live=True)
                 # DB jobs marked RUNNING are stale if not in memory
                 running_jobs = [j for j in sdk_jobs if j.get('is_live', False)]
                 stale_jobs = [j for j in sdk_jobs if j.get('is_stale', False)]
                 other_jobs = [j for j in sdk_jobs if not j.get('is_live', False) and not j.get('is_stale', False)]
                 
-                # FDE: If there are stale jobs but no live jobs, show a notice
+                #  If there are stale jobs but no live jobs, show a notice
                 if stale_jobs and not running_jobs:
                     snowpipe_html += f'''
                     <div style="background: rgba(251, 191, 36, 0.15); border: 1px solid rgba(251, 191, 36, 0.4); border-radius: 8px; padding: 12px; margin-bottom: 16px;">
@@ -5712,7 +5715,7 @@ async def monitor_page():
                             sdk_type = 'Classic'
                             sdk_color = '#f59e0b'  # Amber for classic
                         
-                        # FDE: Calculate time since last batch for this job
+                        #  Calculate time since last batch for this job
                         last_batch_str = j.get('last_batch', 'N/A')
                         batching_status = ''
                         batching_color = '#64748b'
@@ -5803,7 +5806,7 @@ async def monitor_page():
             snowpipe_html += '</div>'
             
             # ========== BUILD RECENT DATA HTML ==========
-            # FDE: Dynamically show data based on what the user is streaming to
+            #  Dynamically show data based on what the user is streaming to
             # - If active job targets a stage → direct user to Stage File Preview
             # - If active job targets a table → query that table dynamically
             # - If no active jobs → show helpful guidance
@@ -5821,7 +5824,7 @@ async def monitor_page():
             
             try:
                 if active_target_type == 'stage':
-                    # FDE: For stage streaming, guide user to the Stage File Preview below
+                    #  For stage streaming, guide user to the Stage File Preview below
                     stage_name_clean = active_target.replace('@', '')
                     recent_data_html = f'''
                     <div class="panel" style="margin-top: 24px;">
@@ -5846,11 +5849,11 @@ async def monitor_page():
                     auto_select_stage = stage_name_clean
                     
                 elif active_target_type == 'table' and active_target:
-                    # FDE: Query the actual target table dynamically
+                    #  Query the actual target table dynamically
                     # Ensure the table name is fully qualified
                     target_table = active_target
                     if '.' not in target_table:
-                        target_table = f"SI_DEMOS.PRODUCTION.{target_table}"
+                        target_table = f"{DB}.{SCHEMA_PRODUCTION}.{target_table}"
                     
                     result = session.sql(f"""
                         SELECT METER_ID, READING_TIMESTAMP, USAGE_KWH, VOLTAGE, CUSTOMER_SEGMENT, DATA_QUALITY, PRODUCTION_MATCHED, CREATED_AT
@@ -5959,9 +5962,9 @@ async def monitor_page():
                     auto_select_stage = None
                 else:
                     # No active jobs - show default table with guidance
-                    result = session.sql("""
+                    result = session.sql(f"""
                         SELECT METER_ID, READING_TIMESTAMP, USAGE_KWH, VOLTAGE, CUSTOMER_SEGMENT, DATA_QUALITY, PRODUCTION_MATCHED, CREATED_AT
-                        FROM SI_DEMOS.PRODUCTION.AMI_STREAMING_DATA
+                        FROM {DB}.{SCHEMA_PRODUCTION}.AMI_STREAMING_DATA
                         ORDER BY CREATED_AT DESC
                         LIMIT 10
                     """).collect()
@@ -6089,7 +6092,7 @@ async def monitor_page():
         snowpipe_html = ""
     
     # ========== BUILD BRONZE TABLE PREVIEW HTML ==========
-    # FDE: Live preview showing data landing in bronze tables from Snowpipe
+    #  Live preview showing data landing in bronze tables from Snowpipe
     bronze_preview_html = f'''
     <div class="panel" style="margin-top: 24px;">
         <div class="panel-title" style="display: flex; align-items: center; justify-content: space-between;">
@@ -6292,7 +6295,7 @@ async def monitor_page():
     '''
     
     # ========== BUILD STAGE PREVIEW HTML ==========
-    # FDE: S3 Select-style live preview of raw files landing in stages
+    #  S3 Select-style live preview of raw files landing in stages
     stage_preview_html = f'''
     <div class="panel" style="margin-top: 24px;">
         <div class="panel-title">{get_material_icon('folder_open', '20px', '#0ea5e9')} Stage File Preview (S3 Select-Style)</div>
@@ -6330,10 +6333,10 @@ async def monitor_page():
     </div>
     
     <script>
-        // FDE: Preserve stage selection across page refreshes using localStorage
+        //  Preserve stage selection across page refreshes using localStorage
         const STAGE_STORAGE_KEY = 'flux_monitor_selected_stage';
         
-        // FDE: Server-provided auto-select stage (from active streaming job)
+        //  Server-provided auto-select stage (from active streaming job)
         const AUTO_SELECT_STAGE = '{auto_select_stage if auto_select_stage else ""}';
         
         // Load stages on page load and restore previous selection
@@ -6379,7 +6382,7 @@ async def monitor_page():
                     select.appendChild(intGroup);
                 }}
                 
-                // FDE: Priority order for stage selection:
+                //  Priority order for stage selection:
                 // 1. Server-provided AUTO_SELECT_STAGE (from active streaming job) - highest priority
                 // 2. User's previously saved selection from localStorage
                 // 3. Default to first option
@@ -6415,7 +6418,7 @@ async def monitor_page():
             const stageName = select.value;
             const contentDiv = document.getElementById('stage-preview-content');
             
-            // FDE: Save selection to localStorage for persistence across refreshes
+            //  Save selection to localStorage for persistence across refreshes
             if (stageName) {{
                 localStorage.setItem(STAGE_STORAGE_KEY, stageName);
             }} else {{
@@ -6497,7 +6500,7 @@ async def monitor_page():
             }}
         }}
         
-        // FDE: Smart auto-refresh that updates metrics via AJAX without full page reload
+        //  Smart auto-refresh that updates metrics via AJAX without full page reload
         // This preserves stage selection and user interactions
         let refreshCountdown = 30;
         let refreshInterval = null;
@@ -6578,7 +6581,7 @@ async def monitor_page():
     </script>
     '''
     
-    # FDE Insight: Calculate stream health status for at-a-glance understanding
+    # Insight: Calculate stream health status for at-a-glance understanding
     # Health states: HEALTHY (data flowing), BUFFERING (waiting for batch), STALLED (no data 5+ min), IDLE (no jobs)
     stream_health = "IDLE"
     health_color = "#64748b"
@@ -6638,7 +6641,7 @@ async def monitor_page():
     <head>
         <title>Monitor - FLUX Data Forge</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <!-- FDE: Removed meta refresh - using AJAX to preserve UI state -->
+        <!--  Removed meta refresh - using AJAX to preserve UI state -->
         {get_base_styles()}
         <style>
             /* Stream Health Indicator Styles */
@@ -6691,7 +6694,7 @@ async def monitor_page():
             {get_status_bar_html()}
             {get_tabs_html('monitor')}
             
-            <!-- FDE: Prominent Stream Health Indicator - answers "is my stream working?" at a glance -->
+            <!--  Prominent Stream Health Indicator - answers "is my stream working?" at a glance -->
             <div class="health-indicator {stream_health.lower()}" id="health-indicator">
                 <span class="material-symbols-outlined health-icon" style="color: {health_color};">{health_icon}</span>
                 <div>
@@ -6718,7 +6721,7 @@ async def monitor_page():
                 </div>
             </div>
             
-            <!-- FDE: Section order follows data pipeline flow: Generator → S3 Stage → Snowpipe → Bronze Table → Tasks -->
+            <!--  Section order follows data pipeline flow: Generator → S3 Stage → Snowpipe → Bronze Table → Tasks -->
             
             {recent_data_html}
             
@@ -6730,7 +6733,7 @@ async def monitor_page():
             
             {tasks_html}
             
-            <!-- FDE: External Stage Diagnostics Panel - pre-flight check for S3 streaming -->
+            <!--  External Stage Diagnostics Panel - pre-flight check for S3 streaming -->
             <div class="panel" style="margin-top: 24px;">
                 <div class="panel-title" style="display: flex; align-items: center; gap: 8px;">
                     {get_material_icon('health_and_safety', '20px', '#f59e0b')} External Stage Health Check
@@ -6842,7 +6845,7 @@ async def monitor_page():
                                                 </div>
                                                 <div>
                                                     <label style="color: #94a3b8; font-size: 0.8rem; display: block; margin-bottom: 4px;">Source Stage</label>
-                                                    <input type="text" id="new-pipe-stage" value="${{stageInfo.name || 'SI_DEMOS.PRODUCTION.EXT_RAW_AMI'}}" readonly style="width: 100%; padding: 8px; background: rgba(15,23,42,0.5); border: 1px solid rgba(100,116,139,0.2); border-radius: 6px; color: #94a3b8;">
+                                                    <input type="text" id="new-pipe-stage" value="${{stageInfo.name || '{DB}.PRODUCTION.EXT_RAW_AMI'}}" readonly style="width: 100%; padding: 8px; background: rgba(15,23,42,0.5); border: 1px solid rgba(100,116,139,0.2); border-radius: 6px; color: #94a3b8;">
                                                 </div>
                                             </div>
                                             <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px;">
@@ -6909,7 +6912,7 @@ async def monitor_page():
                 try {{
                     const formData = new FormData();
                     formData.append('pipe_name', pipeName);
-                    formData.append('target_database', 'SI_DEMOS');
+                    formData.append('target_database', '{DB}');
                     formData.append('target_schema', schema);
                     formData.append('target_table', table);
                     formData.append('source_stage', stage);
@@ -7055,7 +7058,7 @@ async def monitor_page():
             </div>
         </div>
         
-        <!-- FDE: Smart refresh indicator - shows countdown, doesn't reset page state -->
+        <!--  Smart refresh indicator - shows countdown, doesn't reset page state -->
         <div class="refresh-indicator" onclick="manualRefresh()" style="cursor: pointer;" title="Click to refresh now">
             <span class="material-symbols-outlined" style="font-size: 16px;">sync</span>
             <span>Auto-refresh in <span id="refresh-countdown" class="refresh-countdown">30s</span></span>
@@ -7073,7 +7076,7 @@ async def validate_page():
             result = snowflake_session.sql("SHOW DATABASES").collect()
             databases = [r['name'] for r in result if not r['name'].startswith('SNOWFLAKE')]
     except:
-        databases = ['SI_DEMOS']
+        databases = [DB]
     
     db_options = "".join([f'<option value="{db}">{db}</option>' for db in databases])
     
@@ -7146,10 +7149,10 @@ async def history_page():
     history_rows = []
     try:
         if snowflake_session:
-            result = snowflake_session.sql("""
+            result = snowflake_session.sql(f"""
                 SELECT JOB_ID, CREATED_AT, MODE, DATABASE_NAME, SCHEMA_NAME, TABLE_NAME,
                        METERS, DAYS, ROWS_GENERATED, DURATION_SECONDS, STATUS
-                FROM SI_DEMOS.APPLICATIONS.FLUX_GENERATION_HISTORY
+                FROM {DB}.{SCHEMA_APPLICATIONS}.FLUX_GENERATION_HISTORY
                 ORDER BY CREATED_AT DESC
                 LIMIT 50
             """).collect()
@@ -7295,7 +7298,7 @@ async def suspend_task(task_name: str = Form(...)):
     try:
         session = get_valid_session()
         if session:
-            session.sql(f"ALTER TASK SI_DEMOS.PRODUCTION.{task_name} SUSPEND").collect()
+            session.sql(f"ALTER TASK {DB}.{SCHEMA_PRODUCTION}.{task_name} SUSPEND").collect()
             return RedirectResponse(url="/monitor", status_code=303)
     except Exception as e:
         logger.error(f"Failed to suspend task {task_name}: {e}")
@@ -7308,7 +7311,7 @@ async def resume_task(task_name: str = Form(...)):
     try:
         session = get_valid_session()
         if session:
-            session.sql(f"ALTER TASK SI_DEMOS.PRODUCTION.{task_name} RESUME").collect()
+            session.sql(f"ALTER TASK {DB}.{SCHEMA_PRODUCTION}.{task_name} RESUME").collect()
             return RedirectResponse(url="/monitor", status_code=303)
     except Exception as e:
         logger.error(f"Failed to resume task {task_name}: {e}")
@@ -7331,7 +7334,7 @@ async def stop_streaming_job(job_id: str = Form(...)):
         if session:
             try:
                 session.sql(f"""
-                    UPDATE SI_DEMOS.PRODUCTION.STREAMING_JOBS 
+                    UPDATE {DB}.{SCHEMA_PRODUCTION}.STREAMING_JOBS 
                     SET STATUS = 'STOPPED', UPDATED_AT = CURRENT_TIMESTAMP()
                     WHERE JOB_ID = '{job_id}'
                 """).collect()
@@ -7381,7 +7384,7 @@ async def start_stream(
     rows_per_sec: int = Form(1000),
     batch_size_mb: int = Form(10),
     max_client_lag: int = Form(1),
-    table: str = Form("SI_DEMOS.PRODUCTION.AMI_STREAMING_DATA"),
+    table: str = Form(f"{DB}.{SCHEMA_PRODUCTION}.AMI_STREAMING_DATA"),
     new_table: str = Form(None),
     # New production matching parameters
     production_source: str = Form("METER_INFRASTRUCTURE"),
@@ -7419,8 +7422,8 @@ async def start_stream(
     
     if snowflake_session:
         try:
-            database = "SI_DEMOS"
-            schema = "PRODUCTION"
+            database = DB
+            schema = SCHEMA_PRODUCTION
             
             # Get emission pattern config
             pattern_cfg = EMISSION_PATTERNS.get(emission_pattern, EMISSION_PATTERNS['STAGGERED_REALISTIC'])
@@ -7535,7 +7538,7 @@ async def start_stream(
                 # Create task with corrected RANDOM() usage (no arguments)
                 task_ddl = f"""
                 CREATE OR REPLACE TASK {database}.{schema}.{task_name}
-                    WAREHOUSE = SI_DEMO_WH
+                    WAREHOUSE = {WAREHOUSE}
                     SCHEDULE = '{interval} MINUTE'
                     ALLOW_OVERLAPPING_EXECUTION = FALSE
                     COMMENT = 'AMI streaming - {meters} meters every {interval} min - {service_area} - Production:{production_matched} - Job: {job_id}'
@@ -7758,7 +7761,7 @@ async def start_stream(
             
             elif mechanism == "stage_json":
                 # Unified Stage JSON streaming - handles both internal and external stages
-                # FDE: Critical for CNP demo showing raw data landing before transformation
+                #  Critical for utility demo showing raw data landing before transformation
                 
                 # Determine target stage - use new_stage_name if creating new, else use selected or default
                 if stage_name == '__create_new__' and new_stage_name:
@@ -7960,7 +7963,7 @@ async def generate_batch(
     start_date: str = Form(None),
     service_area: str = Form("TEXAS_GULF_COAST"),
     meter_prefix: str = Form("MTR"),
-    table: str = Form("SI_DEMOS.PRODUCTION.AMI_INTERVAL_READINGS"),
+    table: str = Form(f"{DB}.{SCHEMA_PRODUCTION}.AMI_INTERVAL_READINGS"),
     include_variant: str = Form("false"),
     gen_asset360: str = Form(None),
     gen_work_orders: str = Form(None),
@@ -8078,7 +8081,7 @@ async def list_databases():
         return {"databases": databases, "count": len(databases)}
     except Exception as e:
         logger.warning(f"Failed to list databases: {e}")
-        return {"databases": ["SI_DEMOS"], "error": str(e)}
+        return {"databases": [DB], "error": str(e)}
 
 
 @app.get("/api/schemas/{database}")
@@ -8122,12 +8125,12 @@ async def list_tables(database: str, schema: str):
 async def list_bronze_tables():
     """
     List tables suitable for bronze/raw data landing (tables with VARIANT columns).
-    FDE Mode: Returns tables that can serve as Snowpipe targets.
+    Advanced Mode: Returns tables that can serve as Snowpipe targets.
     Uses preloaded cache for instant response when available.
     """
     global dependency_cache
     
-    # FDE: Use cached data if available for instant response
+    #  Use cached data if available for instant response
     with dependency_cache['lock']:
         if dependency_cache['tables'] is not None:
             cached_tables = dependency_cache['tables']
@@ -8144,7 +8147,7 @@ async def list_bronze_tables():
     
     try:
         # Query for tables with VARIANT columns (typical bronze table pattern)
-        # Check common locations: SI_DEMOS.PRODUCTION and current database/schema
+        # Check common locations: FLUX_DB.PRODUCTION and current database/schema
         bronze_tables = []
         
         # Get current context
@@ -8153,15 +8156,15 @@ async def list_bronze_tables():
             current_db = ctx[0]
             current_schema = ctx[1]
         except:
-            current_db = "SI_DEMOS"
-            current_schema = "PRODUCTION"
+            current_db = DB
+            current_schema = SCHEMA_PRODUCTION
         
         # Search in current database/schema plus all accessible schemas in current database
         # This ensures we find tables in DEV, PRODUCTION, and any other schemas
         search_locations = [
             (current_db, current_schema),
-            ("SI_DEMOS", "PRODUCTION"),
-            ("SI_DEMOS", "DEV"),
+            (DB, "PRODUCTION"),
+            (DB, "DEV"),
         ]
         
         # Dynamically discover all schemas in the current database
@@ -8235,7 +8238,7 @@ async def list_bronze_tables():
 @app.get("/api/bronze-tables")
 async def get_bronze_tables_for_monitor():
     """
-    FDE: Get list of bronze/landing tables for the Monitor page dropdown.
+     Get list of bronze/landing tables for the Monitor page dropdown.
     Returns simplified list with row counts for quick selection.
     Includes both VARIANT-based bronze tables AND explicitly named raw/bronze tables.
     """
@@ -8248,7 +8251,7 @@ async def get_bronze_tables_for_monitor():
         seen_tables = set()
         
         # Search in both PRODUCTION and DEV schemas
-        for schema_path in ["SI_DEMOS.PRODUCTION", "SI_DEMOS.DEV"]:
+        for schema_path in [f"{DB}.PRODUCTION", f"{DB}.DEV"]:
             try:
                 db, schema = schema_path.split('.')
                 result = session.sql(f"SHOW TABLES IN {schema_path}").collect()
@@ -8305,7 +8308,7 @@ async def get_bronze_tables_for_monitor():
 @app.get("/api/bronze-preview")
 async def get_bronze_preview(table: str):
     """
-    FDE: Get live preview of data in a bronze/landing table.
+     Get live preview of data in a bronze/landing table.
     Returns recent rows ordered by ingestion time for the Monitor page.
     """
     if not table:
@@ -8411,7 +8414,7 @@ async def get_bronze_preview(table: str):
 
 def check_pipe_exists_for_table(session, database: str, schema: str, table_name: str):
     """
-    FDE: Check if a Snowpipe exists that loads into the specified table.
+     Check if a Snowpipe exists that loads into the specified table.
     Returns dict with pipe info or None if no pipe found.
     """
     try:
@@ -8441,7 +8444,7 @@ def check_pipe_exists_for_table(session, database: str, schema: str, table_name:
 
 def get_external_stages_for_schema(session, database: str, schema: str):
     """
-    FDE: Get list of external stages available (check PRODUCTION schema for shared stages).
+     Get list of external stages available (check PRODUCTION schema for shared stages).
     """
     external_stages = []
     
@@ -8488,7 +8491,7 @@ async def create_bronze_table(
 ):
     """
     Create a bronze table for raw data landing with VARIANT column.
-    FDE Mode: Standard medallion architecture bronze table schema.
+    Advanced Mode: Standard medallion architecture bronze table schema.
     
     Optional: Also create a Snowpipe if user opts in via create_pipe=True.
     """
@@ -8535,13 +8538,13 @@ async def create_bronze_table(
             logger.info(f"Created bronze table: {full_name}")
             table_created = True
         
-        # FDE: Check if a pipe exists for this table
+        #  Check if a pipe exists for this table
         pipe_info = check_pipe_exists_for_table(session, db, schema, tbl)
         
-        # FDE: Get available external stages for pipe creation suggestion
+        #  Get available external stages for pipe creation suggestion
         available_stages = get_external_stages_for_schema(session, db, schema)
         
-        # FDE: If user opted in to create pipe and provided source stage
+        #  If user opted in to create pipe and provided source stage
         pipe_created = False
         pipe_details = None
         if create_pipe and source_stage and not pipe_info.get('exists'):
@@ -8570,7 +8573,7 @@ async def create_bronze_table(
                 session.sql(create_pipe_sql).collect()
                 logger.info(f"Auto-created pipe {full_pipe_name} for table {full_name}")
                 
-                # FDE PATTERN: Auto-refresh new pipes to catch up on existing files
+                # PATTERN: Auto-refresh new pipes to catch up on existing files
                 files_refreshed = 0
                 try:
                     logger.info(f"Auto-refreshing pipe {full_pipe_name} to ingest existing files...")
@@ -8608,7 +8611,7 @@ async def create_bronze_table(
             "database": db,
             "schema": schema,
             "columns": ["RAW_DATA (VARIANT)", "FILE_NAME (VARCHAR)", "LOAD_TS (TIMESTAMP_NTZ)"],
-            # FDE: Include pipe detection info for transparent user feedback
+            #  Include pipe detection info for transparent user feedback
             "pipe_status": {
                 "has_pipe": pipe_info.get('exists', False),
                 "pipe_name": pipe_info.get('pipe_name'),
@@ -8617,7 +8620,7 @@ async def create_bronze_table(
                 "pipe_details": pipe_details
             },
             "available_stages": available_stages,
-            # FDE: Provide guidance if no pipe exists
+            #  Provide guidance if no pipe exists
             "requires_pipe": not pipe_info.get('exists', False),
             "pipe_guidance": None if pipe_info.get('exists') else (
                 f"No Snowpipe found for {full_name}. To enable auto-ingest from S3, "
@@ -8640,7 +8643,7 @@ async def create_bronze_table(
 @app.get("/api/pipes/check/{database}/{schema}/{table_name}")
 async def check_pipe_for_table(database: str, schema: str, table_name: str):
     """
-    FDE: API endpoint to check if a Snowpipe exists for a given table.
+     API endpoint to check if a Snowpipe exists for a given table.
     Used by UI to show pipe status and offer opt-in creation.
     """
     session = get_valid_session()
@@ -8679,7 +8682,7 @@ async def auto_create_pipe_for_table(
     auto_refresh: bool = Form(True)
 ):
     """
-    FDE: Create a Snowpipe for a bronze table with user consent.
+     Create a Snowpipe for a bronze table with user consent.
     This is the opt-in endpoint called when user explicitly requests pipe creation.
     """
     session = get_valid_session()
@@ -8778,7 +8781,7 @@ async def list_warehouses():
         return {"warehouses": warehouses, "count": len(warehouses)}
     except Exception as e:
         logger.warning(f"Failed to list warehouses: {e}")
-        return {"warehouses": ["SI_DEMO_WH"], "error": str(e)}
+        return {"warehouses": ["FLUX_WH"], "error": str(e)}
 
 
 @app.get("/api/stages/{database}/{schema}")
@@ -8871,7 +8874,7 @@ async def list_all_resources():
         ])
     except Exception as e:
         resources["errors"].append(f"Databases: {str(e)}")
-        resources["databases"] = ["SI_DEMOS"]
+        resources["databases"] = [DB]
     
     # Get warehouses
     try:
@@ -8882,7 +8885,7 @@ async def list_all_resources():
         ])
     except Exception as e:
         resources["errors"].append(f"Warehouses: {str(e)}")
-        resources["warehouses"] = ["SI_DEMO_WH"]
+        resources["warehouses"] = ["FLUX_WH"]
     
     # Get stages in account
     try:
@@ -9470,7 +9473,7 @@ async def preview_streaming_records(
 @app.get("/api/monitor/metrics")
 async def get_monitor_metrics():
     """
-    FDE: API endpoint for AJAX-based monitor page refresh.
+     API endpoint for AJAX-based monitor page refresh.
     Returns current streaming metrics without requiring full page reload.
     Preserves user state (like stage selection) while keeping data fresh.
     """
@@ -9492,8 +9495,8 @@ async def get_monitor_metrics():
         if session:
             # Count active tasks
             try:
-                result = session.sql("""
-                    SHOW TASKS LIKE '%AMI_STREAMING%' IN SCHEMA SI_DEMOS.PRODUCTION
+                result = session.sql(f"""
+                    SHOW TASKS LIKE '%AMI_STREAMING%' IN SCHEMA {DB}.{SCHEMA_PRODUCTION}
                 """).collect()
                 for row in result:
                     row_dict = row.asDict() if hasattr(row, 'asDict') else dict(row)
@@ -9514,13 +9517,13 @@ async def get_monitor_metrics():
             for table_name in ['AMI_STREAMING_DATA', 'AMI_STREAMING_READINGS', 'AMI_STREAMING_READINGS_TEXAS_GULF_COAST', 'AMI_STREAMING_READINGS_HOUSTON_METRO']:
                 try:
                     result = session.sql(f"""
-                        SELECT COUNT(*) as cnt FROM SI_DEMOS.PRODUCTION.{table_name}
+                        SELECT COUNT(*) as cnt FROM {DB}.{SCHEMA_PRODUCTION}.{table_name}
                         WHERE CREATED_AT >= DATEADD(HOUR, -1, CURRENT_TIMESTAMP())
                     """).collect()
                     recent_rows_1h += result[0]['CNT'] if result else 0
                     
                     result = session.sql(f"""
-                        SELECT COUNT(*) as cnt FROM SI_DEMOS.PRODUCTION.{table_name}
+                        SELECT COUNT(*) as cnt FROM {DB}.{SCHEMA_PRODUCTION}.{table_name}
                     """).collect()
                     total_rows += result[0]['CNT'] if result else 0
                 except:
@@ -9597,7 +9600,7 @@ async def get_monitor_metrics():
 @app.get("/api/external-stage/diagnostics")
 async def external_stage_diagnostics():
     """
-    FDE PATTERN: Pre-flight diagnostics for external stage streaming.
+    PATTERN: Pre-flight diagnostics for external stage streaming.
     
     This endpoint validates the ENTIRE external stage streaming path BEFORE a user
     starts a job, providing clear feedback on what's working and what's broken.
@@ -9652,7 +9655,7 @@ async def external_stage_diagnostics():
         "detail": f"Access Key: {aws_access_key[:8]}...{aws_access_key[-4:]}" if has_creds else "No AWS credentials found"
     }
     if not has_creds:
-        check2["fix"] = "Update Snowflake secret SI_DEMOS.PRODUCTION.AWS_S3_CREDENTIALS with valid IAM user credentials"
+        check2["fix"] = "Update Snowflake secret FLUX_DB.PRODUCTION.AWS_S3_CREDENTIALS with valid IAM user credentials"
         all_passed = False
     diagnostics["checks"].append(check2)
     
@@ -9714,7 +9717,7 @@ async def external_stage_diagnostics():
             )
     
     # Check 5: External stage metadata
-    stage_name = "SI_DEMOS.PRODUCTION.EXT_RAW_AMI"
+    stage_name = f"{DB}.{SCHEMA_PRODUCTION}.EXT_RAW_AMI"
     s3_bucket = None
     s3_prefix = ""
     
@@ -9912,7 +9915,7 @@ async def list_stages():
     """
     global dependency_cache
     
-    # FDE: Use cached data if available for instant response
+    #  Use cached data if available for instant response
     with dependency_cache['lock']:
         if dependency_cache['stages'] is not None:
             cached_stages = dependency_cache['stages']
@@ -10002,7 +10005,7 @@ async def list_stages():
 async def preview_stage_files(stage_name: str, limit: int = 10):
     """
     Live preview of files landing in a stage - S3 Select-style querying.
-    FDE: Critical for demonstrating raw data landing before transformation.
+     Critical for demonstrating raw data landing before transformation.
     
     This queries staged files directly using Snowflake's SELECT FROM @stage syntax,
     similar to AWS S3 Select functionality.
@@ -10017,7 +10020,7 @@ async def preview_stage_files(stage_name: str, limit: int = 10):
             stage_name = f"@{stage_name}"
         
         # First, list files in the stage to show file metadata
-        # FDE: Sort by last_modified DESC to show most recent files first
+        #  Sort by last_modified DESC to show most recent files first
         files_result = []
         try:
             list_query = f"LIST {stage_name}"
@@ -10042,7 +10045,7 @@ async def preview_stage_files(stage_name: str, limit: int = 10):
             logger.warning(f"Could not list stage files: {list_err}")
         
         # Now query the actual data from staged files (S3 Select equivalent)
-        # FDE: Use FILES parameter to query from the most recent files we found
+        #  Use FILES parameter to query from the most recent files we found
         preview_data = []
         query_method = None
         
@@ -10055,7 +10058,7 @@ async def preview_stage_files(stage_name: str, limit: int = 10):
                 recent_files_pattern = recent_file_names
         
         # Try JSON format query
-        # FDE: Handle BOTH flat schema (old ami_data files) AND nested schema (new ami_stream files)
+        #  Handle BOTH flat schema (old ami_data files) AND nested schema (new ami_stream files)
         try:
             # If we have recent files, use PATTERN to query only those files
             if recent_files_pattern and len(recent_files_pattern) > 0:
@@ -10074,7 +10077,7 @@ async def preview_stage_files(stage_name: str, limit: int = 10):
                             $1:meter:service_area::VARCHAR AS SERVICE_AREA,
                             METADATA$FILENAME AS SOURCE_FILE,
                             METADATA$FILE_ROW_NUMBER AS ROW_NUM
-                        FROM {stage_name} (FILE_FORMAT => 'SI_DEMOS.PRODUCTION.FF_JSON', PATTERN => '.*{first_recent_file}.*')
+                        FROM {stage_name} (FILE_FORMAT => '{DB}.{SCHEMA_PRODUCTION}.FF_JSON', PATTERN => '.*{first_recent_file}.*')
                         LIMIT {limit}
                     """
                 else:
@@ -10090,7 +10093,7 @@ async def preview_stage_files(stage_name: str, limit: int = 10):
                             $1:SERVICE_AREA::VARCHAR AS SERVICE_AREA,
                             METADATA$FILENAME AS SOURCE_FILE,
                             METADATA$FILE_ROW_NUMBER AS ROW_NUM
-                        FROM {stage_name} (FILE_FORMAT => 'SI_DEMOS.PRODUCTION.FF_JSON', PATTERN => '.*{first_recent_file}.*')
+                        FROM {stage_name} (FILE_FORMAT => '{DB}.{SCHEMA_PRODUCTION}.FF_JSON', PATTERN => '.*{first_recent_file}.*')
                         LIMIT {limit}
                     """
             else:
@@ -10105,7 +10108,7 @@ async def preview_stage_files(stage_name: str, limit: int = 10):
                         $1:SERVICE_AREA::VARCHAR AS SERVICE_AREA,
                         METADATA$FILENAME AS SOURCE_FILE,
                         METADATA$FILE_ROW_NUMBER AS ROW_NUM
-                    FROM {stage_name} (FILE_FORMAT => 'SI_DEMOS.PRODUCTION.FF_JSON')
+                    FROM {stage_name} (FILE_FORMAT => '{DB}.{SCHEMA_PRODUCTION}.FF_JSON')
                     LIMIT {limit}
                 """
             result = session.sql(json_query).collect()
@@ -10230,12 +10233,12 @@ async def list_storage_integrations():
 async def list_pipes():
     """
     List available Snowpipe objects for auto-ingestion.
-    FDE PATTERN: Check multiple schemas (PRODUCTION, DEV) to ensure all user pipes are visible.
+    PATTERN: Check multiple schemas (PRODUCTION, DEV) to ensure all user pipes are visible.
     Uses preloaded cache for instant response when available.
     """
     global dependency_cache
     
-    # FDE: Use cached data if available for instant response
+    #  Use cached data if available for instant response
     with dependency_cache['lock']:
         if dependency_cache['pipes'] is not None:
             cached_pipes = dependency_cache['pipes']
@@ -10254,10 +10257,10 @@ async def list_pipes():
         pipes = []
         seen_pipes = set()  # Track full_name to avoid duplicates
         
-        # FDE: Check multiple schemas explicitly to ensure DEV pipes are included
+        #  Check multiple schemas explicitly to ensure DEV pipes are included
         schemas_to_check = [
-            "SI_DEMOS.PRODUCTION",
-            "SI_DEMOS.DEV"
+            f"{DB}.PRODUCTION",
+            f"{DB}.DEV"
         ]
         
         for schema_path in schemas_to_check:
@@ -10384,12 +10387,12 @@ def get_session_context(session) -> tuple:
         result = session.sql("SELECT CURRENT_DATABASE(), CURRENT_SCHEMA()").collect()
         if result:
             row = result[0]
-            database = row[0] or "SI_DEMOS"
-            schema = row[1] or "PRODUCTION"
+            database = row[0] or DB
+            schema = row[1] or SCHEMA_PRODUCTION
             return (database, schema)
     except Exception as e:
         logger.warning(f"Could not get session context, using defaults: {e}")
-    return ("SI_DEMOS", "PRODUCTION")
+    return (DB, SCHEMA_PRODUCTION)
 
 
 def check_object_exists(session, object_type: str, object_name: str) -> dict:
@@ -10638,7 +10641,7 @@ async def create_pipe(
         # Structured audit log for pipe creation
         logger.info(f"Pipe created: name={full_pipe_name}, table={full_table_name}, stage={stage_name}, format={file_format}, auto_ingest={auto_ingest}, replaced={existing_pipe.get('exists', False)}")
         
-        # FDE PATTERN: Auto-refresh new pipes to catch up on existing files
+        # PATTERN: Auto-refresh new pipes to catch up on existing files
         # When a new pipe is created on an external stage with existing files,
         # it won't automatically ingest them - only new notifications trigger ingestion.
         files_refreshed = 0
@@ -11145,7 +11148,7 @@ async def get_streaming_architectures():
 @app.post("/api/streaming/generate-ddl")
 async def generate_streaming_ddl(
     architecture: str = Form(...),  # 'classic' or 'hp'
-    database: str = Form("SI_DEMOS"),
+    database: str = Form(DB),
     schema: str = Form("PRODUCTION"),
     table_name: str = Form("AMI_STREAMING_READINGS"),
     pipe_name: str = Form("AMI_STREAMING_PIPE"),
@@ -11234,7 +11237,7 @@ async def generate_streaming_ddl(
 @app.post("/api/streaming/deploy-ddl")
 async def deploy_streaming_ddl(
     architecture: str = Form(...),
-    database: str = Form("SI_DEMOS"),
+    database: str = Form(DB),
     schema: str = Form("PRODUCTION"),
     table_name: str = Form("AMI_STREAMING_READINGS"),
     pipe_name: str = Form("AMI_STREAMING_PIPE")
@@ -11389,8 +11392,8 @@ async def check_streaming_prerequisites(architecture: str):
 @app.get("/api/streaming/python-client-code")
 async def get_python_client_code(
     architecture: str,
-    database: str = "SI_DEMOS",
-    schema: str = "PRODUCTION",
+    database: str = DB,
+    schema: str = SCHEMA_PRODUCTION,
     table_name: str = "AMI_STREAMING_READINGS",
     pipe_name: str = "AMI_STREAMING_PIPE"
 ):
@@ -11569,7 +11572,7 @@ async def create_pipe(request: Request):
     """
     Create a new Snowpipe on-demand.
     
-    FDE PATTERN: Self-service data pipeline provisioning.
+    PATTERN: Self-service data pipeline provisioning.
     Allows users to create Snowpipes for their specific schema/table combinations
     without needing direct Snowflake access or DDL knowledge.
     
@@ -11590,7 +11593,7 @@ async def create_pipe(request: Request):
     form = await request.form()
     
     pipe_name = form.get('pipe_name', '').strip().upper()
-    target_database = form.get('target_database', 'SI_DEMOS').strip().upper()
+    target_database = form.get('target_database', DB).strip().upper()
     target_schema = form.get('target_schema', 'DEV').strip().upper()
     target_table = form.get('target_table', '').strip().upper()
     source_stage = form.get('source_stage', '').strip()
@@ -11689,7 +11692,7 @@ async def create_pipe(request: Request):
         # Execute the CREATE PIPE
         session.sql(create_pipe_sql).collect()
         
-        # FDE PATTERN: Auto-refresh new pipes to catch up on existing files
+        # PATTERN: Auto-refresh new pipes to catch up on existing files
         # When a new pipe is created on an external stage with existing files,
         # it won't automatically ingest them - only new S3 notifications trigger ingestion.
         # This auto-refresh ensures users don't have to manually discover this behavior.
@@ -11784,7 +11787,7 @@ async def pipes_management_page():
     """
     Snowpipe Management UI - Create, monitor, and manage Snowpipes.
     
-    FDE PATTERN: Self-service data pipeline management.
+    PATTERN: Self-service data pipeline management.
     Provides operational visibility and control over data ingestion pipelines.
     """
     
@@ -11796,7 +11799,7 @@ async def pipes_management_page():
     if session:
         try:
             # Get schemas
-            result = session.sql("SHOW SCHEMAS IN DATABASE SI_DEMOS").collect()
+            result = session.sql(f"SHOW SCHEMAS IN DATABASE {DB}").collect()
             for row in result:
                 row_dict = row.asDict() if hasattr(row, 'asDict') else dict(row)
                 schema_name = row_dict.get('name', '')
@@ -11974,7 +11977,7 @@ async def pipes_management_page():
                             
                             <div class="form-group">
                                 <label>Target Database</label>
-                                <input type="text" name="target_database" id="target_database" value="SI_DEMOS">
+                                <input type="text" name="target_database" id="target_database" value="{DB}">
                             </div>
                             
                             <div class="form-group">
@@ -12262,4 +12265,4 @@ async def pipes_management_page():
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run(app, host="0.0.0.0", port=8080  

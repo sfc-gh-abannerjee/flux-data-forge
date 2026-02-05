@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from datetime import datetime
 import threading
 
+from config import DB, SCHEMA_PRODUCTION
+
 logger = logging.getLogger(__name__)
 
 
@@ -43,9 +45,9 @@ class SnowpipeStreamingConfig:
     private_key: str = ""
     private_key_path: str = "/usr/local/creds/secret_string"
     
-    # Target location
-    database: str = "SI_DEMOS"
-    schema: str = "PRODUCTION"
+    # Target location - defaults from config module
+    database: str = ""
+    schema: str = ""
     table: str = "AMI_STREAMING_READINGS"
     
     # PIPE object name (REQUIRED for Snowpipe Streaming)
@@ -64,9 +66,9 @@ class SnowpipeStreamingConfig:
         if not self.role:
             self.role = os.environ.get('SNOWFLAKE_ROLE', 'SYSADMIN')
         if not self.database:
-            self.database = os.environ.get('SNOWFLAKE_DATABASE', 'SI_DEMOS')
+            self.database = os.environ.get('SNOWFLAKE_DATABASE', DB)
         if not self.schema:
-            self.schema = os.environ.get('SNOWFLAKE_SCHEMA', 'PRODUCTION')
+            self.schema = os.environ.get('SNOWFLAKE_SCHEMA', SCHEMA_PRODUCTION)
     
     def get_account_url(self) -> str:
         """Get the Snowflake account URL"""
@@ -305,7 +307,7 @@ CREATE TABLE IF NOT EXISTS {database}.{schema}.{table_name} (
 )
 CLUSTER BY (DATE_TRUNC('DAY', READING_TIMESTAMP), METER_ID)
 DATA_RETENTION_TIME_IN_DAYS = 7
-CHANGE_TRACKING = ON
+CHANGE_TRACKING = TRUE
 COMMENT = 'Snowpipe Streaming landing table for AMI data'
 ;
 """
@@ -370,12 +372,14 @@ COMMENT ON PIPE {database}.{schema}.{pipe_name} IS
 
 
 def generate_full_ddl(
-    database: str = "SI_DEMOS",
-    schema: str = "PRODUCTION",
+    database: str = None,
+    schema: str = None,
     table_name: str = "AMI_STREAMING_READINGS",
     pipe_name: str = "AMI_STREAMING_PIPE",
 ) -> str:
     """Generate complete DDL for Snowpipe Streaming setup"""
+    database = database or DB
+    schema = schema or SCHEMA_PRODUCTION
     return (
         generate_streaming_table_ddl(database, schema, table_name) +
         "\n" +
@@ -408,11 +412,13 @@ STREAMING_INFO = {
 
 
 def get_python_client_code(
-    database: str = "SI_DEMOS",
-    schema: str = "PRODUCTION",
+    database: str = None,
+    schema: str = None,
     pipe_name: str = "AMI_STREAMING_PIPE",
 ) -> str:
     """Generate Python client code example"""
+    database = database or DB
+    schema = schema or SCHEMA_PRODUCTION
     return f'''#!/usr/bin/env python3
 """
 Snowpipe Streaming Client Example
