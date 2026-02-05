@@ -70,6 +70,8 @@ Flux Data Forge can be deployed in two ways. **Pick the one that matches your ne
 - [Snowflake CLI (Snow CLI)](https://docs.snowflake.com/en/developer-guide/snowflake-cli/installation/installation) installed and configured
 - Docker Desktop installed and running
 
+<br/>
+
 ### Step 1: Set Up Your Snowflake CLI Connection
 
 If you haven't already configured the Snowflake CLI, run:
@@ -102,10 +104,13 @@ snow sql -c my_flux_demo -f scripts/sql/00_standalone_quickstart.sql
 ```
 
 **What this creates:**
+
 - `FLUX_DATA_FORGE` database with `PUBLIC` schema
 - `FLUX_DATA_FORGE_WH` warehouse
 - `AMI_STREAMING_READINGS` table for generated data
 - Image repository and compute pool for SPCS
+
+<br/>
 
 ### Step 3: Build and Push Docker Image
 
@@ -125,6 +130,8 @@ docker tag flux_data_forge:latest <repository_url>/flux_data_forge:latest
 # Push to Snowflake
 docker push <repository_url>/flux_data_forge:latest
 ```
+
+<br/>
 
 ### Step 4: Create the SPCS Service
 
