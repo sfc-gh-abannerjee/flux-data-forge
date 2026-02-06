@@ -12,6 +12,19 @@
 
 ---
 
+## Why Flux Data Forge?
+
+This repository solves the challenge of getting realistic test data for utility demos:
+
+| What You Get | Description |
+|--------------|-------------|
+| **Configurable scale** | Generate 67K rows for quick demos or 350M+ rows for ML training |
+| **Realistic patterns** | Time-of-day curves, customer segments, voltage anomalies, and outage signals |
+| **Multiple output targets** | Write to Snowflake tables, S3 stages, or Postgres simultaneously |
+| **Real-time streaming** | Sub-5-second latency using Snowpipe Streaming SDK |
+
+---
+
 ## Quick Start
 
 ```bash
