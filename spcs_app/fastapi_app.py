@@ -8,7 +8,8 @@ Enhanced with full Snowpipe Streaming SDK volume configuration.
 
 import os
 import logging
-from datetime import datetime, date, timedelta
+import html
+from datetime import datetime, date, timedelta, timezone
 from typing import Optional
 from contextlib import asynccontextmanager
 import json
@@ -16,6 +17,9 @@ import io
 
 # Import centralized configuration
 from config import DB, SCHEMA_PRODUCTION, SCHEMA_APPLICATIONS, get_table_path
+
+# Import SQL sanitization utilities
+from utils.sanitize import validate_identifier, sanitize_sql_value
 
 from fastapi import FastAPI, Request, Form, HTTPException, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -324,13 +328,13 @@ def get_valid_session() -> Optional[Session]:
     except Exception as e:
         error_str = str(e)
         # Check for token expiration errors (390114 is the token expired error code)
-        if '390114' in error_str or 'token' in error_str.lower() and 'expired' in error_str.lower():
+        if '390114' in error_str or ('token' in error_str.lower() and 'expired' in error_str.lower()):
             logger.warning("Snowflake token expired, refreshing session...")
             try:
                 if snowflake_session:
                     try:
                         snowflake_session.close()
-                    except:
+                    except Exception:
                         pass
                 snowflake_session = create_snowflake_session()
                 logger.info("Snowflake session refreshed successfully")
@@ -980,7 +984,7 @@ def internal_stage_streaming_worker(job_id: str, config: dict):
                 import os
                 try:
                     os.unlink(temp_file_path)
-                except:
+                except Exception:
                     pass
             
             # Sleep between batches
@@ -1113,7 +1117,7 @@ def external_stage_streaming_worker(job_id: str, config: dict):
                             urls = json.loads(url_value)
                             if urls and len(urls) > 0:
                                 url_value = urls[0]
-                        except:
+                        except Exception:
                             # Try simple string extraction
                             url_value = url_value.strip('[]"\'')
                     
@@ -5497,7 +5501,7 @@ async def monitor_page():
                         logger.warning(f"Monitor: Could not load pipes from {schema_path}: {e}")
                 # Sort by schema then name
                 pipes_info.sort(key=lambda x: (x.get('schema', ''), x.get('name', '')))
-            except:
+            except Exception:
                 pass
             
             # Check for SDK streaming jobs - first from in-memory active jobs, then from DB
@@ -5561,7 +5565,7 @@ async def monitor_page():
                         'is_live': False,
                         'is_stale': is_stale
                     })
-            except:
+            except Exception:
                 pass
             
             # Combine active and historical
@@ -5583,7 +5587,7 @@ async def monitor_page():
                         SELECT COUNT(*) as cnt FROM {DB}.{SCHEMA_PRODUCTION}.{table_name}
                     """).collect()
                     total_rows += result[0]['CNT'] if result else 0
-                except:
+                except Exception:
                     pass
             
             throughput = f"{recent_rows_1h / 3600:.1f}" if recent_rows_1h > 0 else "--"
@@ -5873,7 +5877,7 @@ async def monitor_page():
                             if hasattr(newest_created, 'replace'):
                                 try:
                                     newest_created = newest_created.replace(tzinfo=None)
-                                except:
+                                except Exception:
                                     pass
                             age_seconds = (now - newest_created).total_seconds()
                             if age_seconds < 60:
@@ -5979,7 +5983,7 @@ async def monitor_page():
                             if hasattr(newest_created, 'replace'):
                                 try:
                                     newest_created = newest_created.replace(tzinfo=None)
-                                except:
+                                except Exception:
                                     pass
                             age_seconds = (now - newest_created).total_seconds()
                             if age_seconds < 60:
@@ -7075,7 +7079,7 @@ async def validate_page():
         if snowflake_session:
             result = snowflake_session.sql("SHOW DATABASES").collect()
             databases = [r['name'] for r in result if not r['name'].startswith('SNOWFLAKE')]
-    except:
+    except Exception:
         databases = [DB]
     
     db_options = "".join([f'<option value="{db}">{db}</option>' for db in databases])
@@ -7157,7 +7161,7 @@ async def history_page():
                 LIMIT 50
             """).collect()
             history_rows = result
-    except:
+    except Exception:
         pass
     
     if history_rows:
@@ -7296,13 +7300,14 @@ ALTER TASK {database}.{schema}.{task_name} RESUME;
 async def suspend_task(task_name: str = Form(...)):
     """Suspend a running streaming task"""
     try:
+        validated_task = validate_identifier(task_name, allow_qualified=False)
         session = get_valid_session()
         if session:
-            session.sql(f"ALTER TASK {DB}.{SCHEMA_PRODUCTION}.{task_name} SUSPEND").collect()
+            session.sql(f"ALTER TASK {DB}.{SCHEMA_PRODUCTION}.{validated_task} SUSPEND").collect()
             return RedirectResponse(url="/monitor", status_code=303)
     except Exception as e:
         logger.error(f"Failed to suspend task {task_name}: {e}")
-        return HTMLResponse(f"<script>alert('Failed to suspend task: {e}'); window.location='/monitor';</script>")
+        return HTMLResponse(f"<script>alert('Failed to suspend task: {html.escape(str(e))}'); window.location='/monitor';</script>")
 
 
 @app.post("/api/task/resume")
@@ -7315,7 +7320,7 @@ async def resume_task(task_name: str = Form(...)):
             return RedirectResponse(url="/monitor", status_code=303)
     except Exception as e:
         logger.error(f"Failed to resume task {task_name}: {e}")
-        return HTMLResponse(f"<script>alert('Failed to resume task: {e}'); window.location='/monitor';</script>")
+        return HTMLResponse(f"<script>alert('Failed to resume task: {html.escape(str(e))}'); window.location='/monitor';</script>")
 
 
 @app.post("/api/streaming/stop")
@@ -7336,15 +7341,15 @@ async def stop_streaming_job(job_id: str = Form(...)):
                 session.sql(f"""
                     UPDATE {DB}.{SCHEMA_PRODUCTION}.STREAMING_JOBS 
                     SET STATUS = 'STOPPED', UPDATED_AT = CURRENT_TIMESTAMP()
-                    WHERE JOB_ID = '{job_id}'
+                    WHERE JOB_ID = '{sanitize_sql_value(job_id)}'
                 """).collect()
-            except:
+            except Exception:
                 pass
         
         return RedirectResponse(url="/monitor", status_code=303)
     except Exception as e:
         logger.error(f"Failed to stop streaming job {job_id}: {e}")
-        return HTMLResponse(f"<script>alert('Failed to stop job: {e}'); window.location='/monitor';</script>")
+        return HTMLResponse(f"<script>alert('Failed to stop job: {html.escape(str(e))}'); window.location='/monitor';</script>")
 
 
 @app.get("/api/streaming/status")
@@ -7413,7 +7418,7 @@ async def start_stream(
     mechanism = flow_cfg.get('mechanism', 'snowpipe_classic')
     dest = flow_cfg.get('dest', 'snowflake')
     
-    job_id = f"flux_stream_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+    job_id = f"flux_stream_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
     target_table = new_table if new_table else table
     
     error_message = None
@@ -7970,7 +7975,7 @@ async def generate_batch(
     gen_power_quality: str = Form(None),
     gen_erm: str = Form(None)
 ):
-    job_id = f"flux_batch_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+    job_id = f"flux_batch_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
     est_rows = meters * (days * 24 * 60 // interval)
     
     return HTMLResponse(f"""
@@ -8049,8 +8054,9 @@ async def validate_schema(
     table: str = Form(...)
 ):
     try:
+        qualified = validate_identifier(f"{database}.{schema}.{table}")
         if snowflake_session:
-            result = snowflake_session.sql(f"DESCRIBE TABLE {database}.{schema}.{table}").collect()
+            result = snowflake_session.sql(f"DESCRIBE TABLE {qualified}").collect()
             columns = [{"name": r['name'], "type": r['type']} for r in result]
             return JSONResponse({
                 "status": "success",
@@ -8091,7 +8097,8 @@ async def list_schemas(database: str):
     if not session:
         raise HTTPException(503, "Not connected to Snowflake")
     try:
-        result = session.sql(f"SHOW SCHEMAS IN DATABASE {database}").collect()
+        validated_db = validate_identifier(database, allow_qualified=False)
+        result = session.sql(f"SHOW SCHEMAS IN DATABASE {validated_db}").collect()
         schemas = sorted([
             r.asDict().get('name', r['name']) if hasattr(r, 'asDict') else r['name']
             for r in result 
@@ -8110,7 +8117,8 @@ async def list_tables(database: str, schema: str):
     if not session:
         raise HTTPException(503, "Not connected to Snowflake")
     try:
-        result = session.sql(f"SHOW TABLES IN {database}.{schema}").collect()
+        validated_ref = validate_identifier(f"{database}.{schema}")
+        result = session.sql(f"SHOW TABLES IN {validated_ref}").collect()
         tables = sorted([
             r.asDict().get('name', r['name']) if hasattr(r, 'asDict') else r['name']
             for r in result
@@ -8155,7 +8163,7 @@ async def list_bronze_tables():
             ctx = session.sql("SELECT CURRENT_DATABASE(), CURRENT_SCHEMA()").collect()[0]
             current_db = ctx[0]
             current_schema = ctx[1]
-        except:
+        except Exception:
             current_db = DB
             current_schema = SCHEMA_PRODUCTION
         
@@ -8175,7 +8183,7 @@ async def list_bronze_tables():
                 schema_name = schema_dict.get('name', '')
                 if schema_name and schema_name not in ['INFORMATION_SCHEMA']:
                     search_locations.append((current_db, schema_name))
-        except:
+        except Exception:
             pass
         
         # Deduplicate while preserving order
@@ -8273,7 +8281,7 @@ async def get_bronze_tables_for_monitor():
                         try:
                             cols = session.sql(f"DESC TABLE {full_name}").collect()
                             has_variant = any('VARIANT' in str(c.asDict().get('type', '')).upper() if hasattr(c, 'asDict') else 'VARIANT' in str(c.get('type', '')).upper() for c in cols)
-                        except:
+                        except Exception:
                             pass
                     
                     if is_bronze or has_variant:
@@ -8282,7 +8290,7 @@ async def get_bronze_tables_for_monitor():
                         try:
                             cnt_result = session.sql(f"SELECT COUNT(*) as CNT FROM {full_name}").collect()
                             row_count = cnt_result[0]['CNT'] if cnt_result else 0
-                        except:
+                        except Exception:
                             row_count = None
                         
                         bronze_tables.append({
@@ -8366,7 +8374,7 @@ async def get_bronze_preview(table: str):
         try:
             cnt_result = session.sql(f"SELECT COUNT(*) as CNT FROM {table}").collect()
             total_count = cnt_result[0]['CNT'] if cnt_result else 0
-        except:
+        except Exception:
             total_count = None
         
         # Calculate freshness if we have a timestamp column
@@ -8383,7 +8391,7 @@ async def get_bronze_preview(table: str):
                     if hasattr(ts_val, 'replace'):
                         try:
                             ts_val = ts_val.replace(tzinfo=None)
-                        except:
+                        except Exception:
                             pass
                     age_seconds = (now - ts_val).total_seconds()
                     newest_age_seconds = age_seconds
@@ -8459,7 +8467,7 @@ def get_external_stages_for_schema(session, database: str, schema: str):
                     'full_name': f"{database}.{schema}.{row_dict.get('name', '')}",
                     'url': row_dict.get('url', '')
                 })
-    except:
+    except Exception:
         pass
     
     # Also check PRODUCTION schema for shared external stages
@@ -8475,7 +8483,7 @@ def get_external_stages_for_schema(session, database: str, schema: str):
                         'url': row_dict.get('url', ''),
                         'shared': True
                     })
-        except:
+        except Exception:
             pass
     
     return external_stages
@@ -8520,7 +8528,7 @@ async def create_bronze_table(
         try:
             session.sql(f"DESC TABLE {full_name}").collect()
             table_existed = True
-        except:
+        except Exception:
             pass  # Table doesn't exist, create it
         
         if not table_existed:
@@ -8698,7 +8706,7 @@ async def auto_create_pipe_for_table(
         # Verify table exists
         try:
             session.sql(f"DESC TABLE {full_table}").collect()
-        except:
+        except Exception:
             raise HTTPException(400, f"Table {full_table} does not exist. Create the table first.")
         
         # Check if pipe already exists
@@ -9065,7 +9073,9 @@ async def fetch_production_meters(
         # Build query based on source configuration
         segment_filter = ""
         if segment and cfg.get('segment_col'):
-            segment_filter = f"WHERE {cfg['segment_col']} = '{segment}'"
+            safe_col = validate_identifier(cfg['segment_col'], allow_qualified=False)
+            safe_segment = sanitize_sql_value(segment)
+            segment_filter = f"WHERE {safe_col} = '{safe_segment}'"
         
         query = f"""
         SELECT 
@@ -9100,7 +9110,7 @@ async def fetch_production_meters(
         _production_meters_cache = {
             "meters": meters,
             "source": source,
-            "fetched_at": datetime.utcnow().isoformat(),
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
             "count": len(meters)
         }
         
@@ -9502,7 +9512,7 @@ async def get_monitor_metrics():
                     row_dict = row.asDict() if hasattr(row, 'asDict') else dict(row)
                     if row_dict.get('state', '').lower() == 'started':
                         task_count += 1
-            except:
+            except Exception:
                 pass
             
             # Count active SDK jobs from memory
@@ -9526,7 +9536,7 @@ async def get_monitor_metrics():
                         SELECT COUNT(*) as cnt FROM {DB}.{SCHEMA_PRODUCTION}.{table_name}
                     """).collect()
                     total_rows += result[0]['CNT'] if result else 0
-                except:
+                except Exception:
                     pass
             
             throughput = f"{recent_rows_1h / 3600:.1f}" if recent_rows_1h > 0 else "--"
@@ -9739,7 +9749,7 @@ async def external_stage_diagnostics():
                             urls = json.loads(url_value)
                             if urls and len(urls) > 0:
                                 url_value = urls[0]
-                        except:
+                        except Exception:
                             # Try simple string extraction
                             url_value = url_value.strip('[]"\'')
                     
@@ -10147,7 +10157,7 @@ async def preview_stage_files(stage_name: str, limit: int = 10):
                         try:
                             import json
                             raw_data = json.loads(raw_data)
-                        except:
+                        except Exception:
                             pass
                     
                     preview_data.append({
@@ -10328,7 +10338,7 @@ async def list_pipes():
                 pipes.append(pipe_info)
             pipes.sort(key=lambda x: x['name'])
             return {"pipes": pipes, "total": len(pipes), "count": len(pipes)}
-        except:
+        except Exception:
             return {
                 "pipes": [],
                 "total": 0,
@@ -10913,7 +10923,7 @@ async def test_postgres_connection():
         
         # Test 3: Insert test data
         result["tests"]["insert"] = "testing..."
-        timestamp = datetime.utcnow()
+        timestamp = datetime.now(timezone.utc)
         test_rows = [
             (f'MTR-PG-API-TEST-{i:03d}', timestamp, 1.5 + i * 0.1, 120.0 + i * 0.5, 'api_test')
             for i in range(5)
@@ -11004,7 +11014,7 @@ async def stream_test_data_to_postgres(
         conn.commit()
         
         # Generate test data
-        timestamp = datetime.utcnow()
+        timestamp = datetime.now(timezone.utc)
         segments = ['RESIDENTIAL', 'COMMERCIAL', 'INDUSTRIAL']
         service_areas = ['HOUSTON_METRO', 'DALLAS_METRO', 'AUSTIN']
         

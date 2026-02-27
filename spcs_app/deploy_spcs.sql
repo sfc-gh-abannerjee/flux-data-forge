@@ -161,6 +161,9 @@ COMMENT = 'Streaming landing table for AMI data from Flux Data Forge';
 --     COMMENT = 'Flux Data Forge - Synthetic AMI Data Generation Service';
 
 -- Option B: Create with inline specification
+-- NOTE: The image path and env vars below use session variables from Section 0.
+-- Replace MY_DATABASE/MY_SCHEMA/MY_WAREHOUSE with your actual values, or use
+-- the service_spec.yaml file (Option A) for a parameterized approach.
 CREATE SERVICE IF NOT EXISTS IDENTIFIER($service_name)
     IN COMPUTE POOL IDENTIFIER($compute_pool_name)
     FROM SPECIFICATION $$
@@ -188,7 +191,9 @@ spec:
       public: true
 $$
     EXTERNAL_ACCESS_INTEGRATIONS = ()
-    COMMENT = 'Flux Data Forge - Synthetic AMI Data Generation Service';
+    COMMENT = 'Flux Data Forge - Synthetic AMI Data Generation Service
+-- IMPORTANT: Update MY_DATABASE, MY_SCHEMA, MY_WAREHOUSE in the spec above
+-- to match Section 0 variables before executing.';
 
 -- =============================================================================
 -- 6. VERIFY DEPLOYMENT

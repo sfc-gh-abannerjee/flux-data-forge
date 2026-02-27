@@ -67,7 +67,6 @@ jobs:
       - name: Lint with flake8
         run: |
           flake8 spcs_app/*.py --max-line-length=120 --ignore=E501,W503 --count --statistics
-        continue-on-error: true
 
   # ============================================================================
   # JOB: Test
@@ -92,12 +91,10 @@ jobs:
       - name: Run unit tests
         run: |
           pytest tests/ -v --tb=short --cov=spcs_app --cov-report=term-missing
-        continue-on-error: true
 
       - name: Run smoke tests
         run: |
           python tests/smoke_test.py
-        continue-on-error: true
 
   # ============================================================================
   # JOB: Build Docker Image
@@ -209,8 +206,10 @@ jobs:
     environment: production
     steps:
       - name: Check required secrets
+        env:
+          SNOWFLAKE_REGISTRY: ${{ secrets.SNOWFLAKE_REGISTRY }}
         run: |
-          if [ -z "${{ secrets.SNOWFLAKE_REGISTRY }}" ]; then
+          if [ -z "$SNOWFLAKE_REGISTRY" ]; then
             echo "::error::SNOWFLAKE_REGISTRY secret is not set"
             echo "Please configure the following secrets in your repository:"
             echo "  - SNOWFLAKE_REGISTRY: your-org-account.registry.snowflakecomputing.com"

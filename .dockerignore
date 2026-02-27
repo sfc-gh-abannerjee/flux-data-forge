@@ -1,0 +1,45 @@
+# Version control
+.git
+.gitignore
+
+# CI/CD
+.github
+
+# Documentation
+*.md
+docs/
+LICENSE
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.pytest_cache
+.mypy_cache
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Environment
+.env
+.env.*
+*.env
+
+# Terraform
+terraform/
+*.tfstate
+*.tfvars
+
+# Tests (not needed in production container)
+tests/
+
+# Scripts
+scripts/
+
+# Build artifacts
+dist/
+build/
