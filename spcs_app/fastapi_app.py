@@ -167,14 +167,29 @@ DATA_FLOWS = {
         'mechanism': 'task',
         'dest': 'snowflake',
     },
-    'snowflake_streaming': {
-        'name': 'Snowflake Table (Real-time)',
-        'latency': '<5 sec',
+    'streaming_insert': {
+        'name': 'SQL Insert (Real-time)',
+        'latency': '< 1 sec',
         'color': '#22c55e',
-        'desc': 'Real-time streaming inserts to Snowflake tables. Best for live demos.',
+        'desc': 'Direct SQL INSERT via Snowpark. No PIPE objects or key-pair auth needed.',
         'icon': 'bolt',
         'mechanism': 'snowpipe_classic',
         'dest': 'snowflake',
+        'throughput': '~25 MB/s (XL warehouse)',
+        'billing': 'Warehouse credits',
+        'badge': 'Zero Setup',
+    },
+    'streaming_hp': {
+        'name': 'Snowpipe Streaming (HP SDK)',
+        'latency': '5-10 sec',
+        'color': '#f59e0b',
+        'desc': 'Native HP SDK with server-side validation, in-flight transforms, and offset tracking.',
+        'icon': 'rocket_launch',
+        'mechanism': 'snowpipe_hp',
+        'dest': 'snowflake',
+        'throughput': 'Up to 10 GB/s per table',
+        'billing': 'Throughput-based',
+        'badge': 'Production Grade',
     },
     'stage_landing': {
         'name': 'Stage Landing (Raw JSON)',
@@ -199,7 +214,8 @@ DATA_FLOWS = {
 # Legacy mappings for backward compatibility
 STREAMING_MECHANISMS = {
     'task': DATA_FLOWS['snowflake_task'],
-    'snowpipe_classic': DATA_FLOWS['snowflake_streaming'],
+    'snowpipe_classic': DATA_FLOWS['streaming_insert'],
+    'snowpipe_hp': DATA_FLOWS['streaming_hp'],
     'stage_json': DATA_FLOWS['stage_landing'],
 }
 
@@ -303,7 +319,29 @@ def create_snowflake_session() -> Session:
         }
         conn = snowflake.connector.connect(**creds)
         return Session.builder.configs({"connection": conn}).create()
-    raise RuntimeError("SPCS token not found")
+
+    # LOCAL DEV FALLBACK: use env vars (injected via cortex source or .env)
+    logger.info("SPCS token not found - attempting local dev session...")
+    account = os.getenv('SNOWFLAKE_ACCOUNT')
+    user = os.getenv('SNOWFLAKE_USER')
+    password = os.getenv('SNOWFLAKE_PASSWORD')
+    if account and user and password:
+        creds = {
+            'account': account,
+            'user': user,
+            'password': password,
+            'warehouse': os.getenv('SNOWFLAKE_WAREHOUSE', 'FLUX_WH'),
+            'database': os.getenv('SNOWFLAKE_DATABASE', 'FLUX_DB'),
+            'schema': os.getenv('SNOWFLAKE_SCHEMA', 'PRODUCTION'),
+        }
+        logger.info(f"Local dev session: account={account}, user={user}")
+        return Session.builder.configs(creds).create()
+    raise RuntimeError(
+        "No SPCS token and no local credentials. "
+        "Set SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, SNOWFLAKE_PASSWORD env vars, "
+        "or use: cortex source <connection> --map account=SNOWFLAKE_ACCOUNT "
+        "--map user=SNOWFLAKE_USER --map password=SNOWFLAKE_PASSWORD -- python3 fastapi_app.py"
+    )
 
 
 def get_valid_session() -> Optional[Session]:
@@ -1652,6 +1690,335 @@ async def get_logo():
     return Response(content=image_data, media_type="image/png")
 
 
+def _py_syntax_color(code: str) -> str:
+    """Apply manual Python syntax coloring via regex (no third-party libs)."""
+    import re
+    import html as _html
+    escaped = _html.escape(code)
+    # Comments (must come first so they aren't overridden)
+    escaped = re.sub(r'(#[^\n]*)', r'<span style="color:#64748b;font-style:italic;">\1</span>', escaped)
+    # Triple-quote docstrings
+    escaped = re.sub(r'(&quot;&quot;&quot;)(.*?)(&quot;&quot;&quot;)', r'<span style="color:#86efac;">\1\2\3</span>', escaped, flags=re.DOTALL)
+    # Strings (single and double quoted)
+    escaped = re.sub(r'(&#x27;[^&#]*?&#x27;)', r'<span style="color:#86efac;">\1</span>', escaped)
+    escaped = re.sub(r'(&quot;[^&]*?&quot;)', r'<span style="color:#86efac;">\1</span>', escaped)
+    # f-string prefix
+    escaped = re.sub(r'\bf(&#x27;|&quot;)', r'<span style="color:#86efac;">f</span><span style="color:#86efac;">\1', escaped)
+    # Keywords
+    kw = r'\b(from|import|as|def|class|return|if|else|elif|for|in|while|with|try|except|finally|raise|yield|async|await|True|False|None|and|or|not|is|lambda|pass|break|continue|global|nonlocal|assert|del)\b'
+    escaped = re.sub(kw, r'<span style="color:#c084fc;">\1</span>', escaped)
+    # Decorators
+    escaped = re.sub(r'(@\w+)', r'<span style="color:#fbbf24;">\1</span>', escaped)
+    # Numbers
+    escaped = re.sub(r'\b(\d+\.?\d*)\b', r'<span style="color:#fbbf24;">\1</span>', escaped)
+    # Function calls
+    escaped = re.sub(r'(\w+)\(', r'<span style="color:#7dd3fc;">\1</span>(', escaped)
+    return escaped
+
+
+def _sql_syntax_color(code: str) -> str:
+    """Apply manual SQL syntax coloring."""
+    import re
+    import html as _html
+    escaped = _html.escape(code)
+    # Comments
+    escaped = re.sub(r'(--[^\n]*)', r'<span style="color:#64748b;font-style:italic;">\1</span>', escaped)
+    # SQL keywords
+    kw = r'\b(CREATE|OR|REPLACE|PIPE|AS|COPY|INTO|FROM|SELECT|TABLE|DATA_SOURCE|TYPE|STREAMING|VARCHAR|FLOAT|BOOLEAN|TIMESTAMP_NTZ|COALESCE|CURRENT_TIMESTAMP|CLUSTER_AT_INGEST_TIME|TRUE|FALSE|GRANT|ON|TO|ROLE|OPERATE|INSERT|EVOLVE|SCHEMA|MATCH_BY_COLUMN_NAME|CASE_INSENSITIVE)\b'
+    escaped = re.sub(kw, r'<span style="color:#c084fc;">\1</span>', escaped, flags=re.IGNORECASE)
+    # Strings
+    escaped = re.sub(r"(&#x27;[^&]*?&#x27;)", r'<span style="color:#86efac;">\1</span>', escaped)
+    # Column references ($1:NAME)
+    escaped = re.sub(r'(\$\d+:\w+)', r'<span style="color:#7dd3fc;">\1</span>', escaped)
+    # Type casts (::TYPE)
+    escaped = re.sub(r'(::)(\w+(?:\(\d+\))?)', r'<span style="color:#fbbf24;">\1\2</span>', escaped)
+    return escaped
+
+
+def _build_code_showcase_panel(mechanism: str) -> str:
+    """Build the HP SDK code showcase panel with mini-wizard. Returns empty string if not HP mechanism."""
+    if mechanism != 'snowpipe_hp':
+        return ''
+
+    # Placeholder tokens — replaced AFTER syntax coloring with <span> elements
+    P = {
+        'account': '__WIZ_ACCOUNT__',
+        'user': '__WIZ_USER__',
+        'role': '__WIZ_ROLE__',
+        'database': '__WIZ_DATABASE__',
+        'schema': '__WIZ_SCHEMA__',
+        'pipe': '__WIZ_PIPE__',
+    }
+
+    # --- Tab 1: Prerequisites ---
+    prereq_code = f"""# Install the HP Snowpipe Streaming SDK
+pip install snowpipe-streaming
+
+# Generate an RSA key pair for JWT auth
+openssl genrsa 2048 | openssl pkcs8 -topk8 -inform PEM -out rsa_key.p8 -nocrypt
+openssl rsa -in rsa_key.p8 -pubout -out rsa_key.pub
+
+# Register the public key with your Snowflake user
+# ALTER USER {P['user']} SET RSA_PUBLIC_KEY='<paste contents of rsa_key.pub>';"""
+
+    # --- Tab 2: Create PIPE DDL ---
+    pipe_ddl = f"""-- Create the target table
+CREATE TABLE IF NOT EXISTS {P['database']}.{P['schema']}.SENSOR_READINGS (
+    DEVICE_ID       VARCHAR(50),
+    READING_TIME    TIMESTAMP_NTZ,
+    VALUE           FLOAT,
+    QUALITY         VARCHAR(20)  DEFAULT 'VALID',
+    INGESTED_AT     TIMESTAMP_NTZ
+);
+
+-- Create a streaming PIPE with server-side transforms
+CREATE OR REPLACE PIPE {P['database']}.{P['schema']}.{P['pipe']}
+AS
+COPY INTO {P['database']}.{P['schema']}.SENSOR_READINGS (
+    DEVICE_ID, READING_TIME, VALUE, QUALITY, INGESTED_AT
+)
+FROM (
+    SELECT
+        $1:DEVICE_ID::VARCHAR(50),
+        $1:READING_TIME::TIMESTAMP_NTZ,
+        $1:VALUE::FLOAT,
+        COALESCE($1:QUALITY::VARCHAR(20), 'VALID'),
+        CURRENT_TIMESTAMP()
+    FROM TABLE(DATA_SOURCE(TYPE => 'STREAMING'))
+)
+CLUSTER_AT_INGEST_TIME = TRUE;
+
+-- Grant permissions
+GRANT OPERATE ON PIPE {P['database']}.{P['schema']}.{P['pipe']} TO ROLE {P['role']};"""
+
+    # --- Tab 3: Stream Data (the core SDK usage) ---
+    stream_code = f"""from snowflake.ingest.streaming import StreamingIngestClient
+
+# 1. Load your private key
+with open('rsa_key.p8', 'r') as f:
+    private_key = f.read()
+
+# 2. Connect to Snowflake
+client = StreamingIngestClient(
+    client_name='my_app',
+    db_name='{P['database']}',
+    schema_name='{P['schema']}',
+    pipe_name='{P['pipe']}',
+    properties={{
+        'url': 'https://{P['account']}.snowflakecomputing.com',
+        'account': '{P['account']}',
+        'user': '{P['user']}',
+        'private_key': private_key,
+        'role': '{P['role']}',
+    }},
+)
+
+# 3. Open a channel
+channel, status = client.open_channel(channel_name='ch1')
+
+# 4. Stream rows
+channel.append_rows(
+    rows=[
+        {{"DEVICE_ID": "S-001", "READING_TIME": "2026-01-17T12:00:00", "VALUE": 23.5}},
+        {{"DEVICE_ID": "S-002", "READING_TIME": "2026-01-17T12:00:00", "VALUE": 18.1}},
+    ],
+    start_offset_token="batch_1",
+    end_offset_token="batch_1",
+)
+
+# 5. Flush to Snowflake
+channel.initiate_flush()
+channel.wait_for_flush(timeout_seconds=30)
+
+# 6. Check status
+statuses = client.get_channel_statuses(["ch1"])
+print(f"Rows landed: {{statuses['ch1'].rows_inserted_count}}")
+
+# 7. Clean up
+channel.close()
+client.close()"""
+
+    # --- Tab 4: Full Mini-App ---
+    full_app_code = f"""#!/usr/bin/env python3
+\"\"\"Minimal HP streaming app - generates and streams sensor data.\"\"\"
+import time, random, datetime
+from snowflake.ingest.streaming import StreamingIngestClient
+
+with open('rsa_key.p8') as f:
+    key = f.read()
+
+client = StreamingIngestClient(
+    client_name='mini_demo', db_name='{P['database']}',
+    schema_name='{P['schema']}', pipe_name='{P['pipe']}',
+    properties={{
+        'url': 'https://{P['account']}.snowflakecomputing.com',
+        'account': '{P['account']}', 'user': '{P['user']}',
+        'private_key': key, 'role': '{P['role']}',
+    }},
+)
+channel, _ = client.open_channel(channel_name='demo_ch')
+
+try:
+    batch_num = 0
+    while True:
+        rows = [
+            {{
+                "DEVICE_ID": f"S-{{i:04d}}",
+                "READING_TIME": datetime.datetime.now().isoformat(),
+                "VALUE": round(random.uniform(10, 40), 2),
+            }}
+            for i in range(100)  # 100 rows per batch
+        ]
+        token = f"batch_{{batch_num}}"
+        channel.append_rows(rows=rows, start_offset_token=token, end_offset_token=token)
+        channel.initiate_flush()
+        channel.wait_for_flush(timeout_seconds=30)
+        batch_num += 1
+        print(f"Batch {{batch_num}}: sent {{len(rows)}} rows")
+        time.sleep(1)  # 1 batch/sec
+except KeyboardInterrupt:
+    print("Shutting down...")
+finally:
+    channel.close()
+    client.close()"""
+
+    # Doc links for each tab annotation
+    doc_links = {
+        'setup': '<a class="code-doc-link" href="https://docs.snowflake.com/en/user-guide/snowpipe-streaming/snowpipe-streaming-high-performance-getting-started" target="_blank">Getting Started Tutorial &nearr;</a>',
+        'ddl': '<a class="code-doc-link" href="https://docs.snowflake.com/en/sql-reference/sql/create-pipe" target="_blank">CREATE PIPE Reference &nearr;</a>',
+        'stream': '<a class="code-doc-link" href="https://docs.snowflake.com/en/user-guide/data-load-snowpipe-streaming-python-sdk-reference" target="_blank">Python SDK Reference &nearr;</a>',
+        'app': '<a class="code-doc-link" href="https://pypi.org/project/snowpipe-streaming/" target="_blank">PyPI: snowpipe-streaming &nearr;</a>',
+    }
+
+    tabs = [
+        ("setup", "1. Prerequisites", prereq_code, "Install SDK + generate RSA key pair for authentication.", "bash", 3),
+        ("ddl", "2. Create PIPE", pipe_ddl, "Define your target table and streaming PIPE with server-side transforms.", "sql", None),
+        ("stream", "3. Stream Data", stream_code, "Connect, open a channel, stream rows, flush, done. That's the whole SDK.", "python", 7),
+        ("app", "4. Full App", full_app_code, "A complete streaming app in ~35 lines. Copy, edit credentials, run.", "python", 35),
+    ]
+
+    def _inject_param_spans(html: str) -> str:
+        """Replace placeholder tokens with <span class='code-param'> elements after syntax coloring."""
+        for field, token in P.items():
+            html = html.replace(token, f'<span class="code-param" data-field="{field}">{token}</span>')
+        return html
+
+    tab_buttons = ""
+    tab_contents = ""
+    for i, (tab_id, label, code, annotation, lang, line_count) in enumerate(tabs):
+        active = " active" if i == 0 else ""
+        line_badge = f' <span class="code-line-count">{line_count} lines of real code</span>' if line_count else ""
+        tab_buttons += f'<button class="code-tab-btn{active}" data-codetab="{tab_id}">{label}{line_badge}</button>\n'
+
+        colored = _sql_syntax_color(code.strip()) if lang == "sql" else _py_syntax_color(code.strip())
+        colored = _inject_param_spans(colored)
+        link_html = doc_links.get(tab_id, '')
+        tab_contents += f'''
+        <div class="code-tab-content{active}" data-codetab="{tab_id}">
+            <div class="code-tab-annotation">{get_material_icon('info', '14px', '#64748b')} {annotation} {link_html}</div>
+            <div style="position: relative;">
+                <button class="code-copy-btn" onclick="copyCodeTab(this, '{tab_id}')">Copy</button>
+                <pre><code>{colored}</code></pre>
+            </div>
+        </div>'''
+
+    # Default values for the wizard fields — these match the placeholder tokens
+    defaults = {
+        'account': 'MY_ACCOUNT',
+        'user': 'MY_USER',
+        'role': 'SYSADMIN',
+        'database': 'MY_DB',
+        'schema': 'MY_SCHEMA',
+        'pipe': 'SENSOR_PIPE',
+    }
+
+    return f'''
+            <div class="panel code-showcase" style="margin-top: 24px;">
+                <div class="panel-title code-showcase-toggle" onclick="toggleCodeShowcase()">
+                    {get_material_icon('integration_instructions', '20px', '#f59e0b')} Build Your Own HP Streaming App
+                    <span style="margin-left: auto; font-size: 0.75rem; font-weight: 400;">
+                        <a class="code-doc-link" href="https://docs.snowflake.com/en/user-guide/snowpipe-streaming/snowpipe-streaming-high-performance-overview" target="_blank" onclick="event.stopPropagation();">HP Architecture Docs &nearr;</a>
+                    </span>
+                    <span class="material-symbols-outlined chevron" id="code-showcase-chevron">expand_more</span>
+                </div>
+                <div id="code-showcase-body" style="display: none;">
+                    <div style="padding: 12px 16px 4px; color: #94a3b8; font-size: 0.85rem;">
+                        Fill in your Snowflake details below &mdash; all code snippets update automatically.
+                    </div>
+                    <div class="code-wizard" id="codeWizard">
+                        <label>Account<input type="text" id="wiz_account" value="{defaults['account']}" placeholder="xy12345"></label>
+                        <label>User<input type="text" id="wiz_user" value="{defaults['user']}" placeholder="MY_USER"></label>
+                        <label>Role<input type="text" id="wiz_role" value="{defaults['role']}" placeholder="SYSADMIN"></label>
+                        <label>Database<input type="text" id="wiz_database" value="{defaults['database']}" placeholder="MY_DB"></label>
+                        <label>Schema<input type="text" id="wiz_schema" value="{defaults['schema']}" placeholder="MY_SCHEMA"></label>
+                        <label>Pipe Name<input type="text" id="wiz_pipe" value="{defaults['pipe']}" placeholder="SENSOR_PIPE"></label>
+                    </div>
+                    <div style="padding: 16px;">
+                        <div class="code-tabs">
+                            {tab_buttons}
+                        </div>
+                        {tab_contents}
+                    </div>
+                </div>
+            </div>
+            <script>
+            function toggleCodeShowcase() {{
+                const body = document.getElementById('code-showcase-body');
+                const chevron = document.getElementById('code-showcase-chevron');
+                if (body.style.display === 'none') {{
+                    body.style.display = 'block';
+                    chevron.classList.add('open');
+                }} else {{
+                    body.style.display = 'none';
+                    chevron.classList.remove('open');
+                }}
+            }}
+            document.querySelectorAll('.code-tab-btn').forEach(btn => {{
+                btn.addEventListener('click', function(e) {{
+                    e.stopPropagation();
+                    const tabId = this.dataset.codetab;
+                    document.querySelectorAll('.code-tab-btn').forEach(b => b.classList.remove('active'));
+                    document.querySelectorAll('.code-tab-content').forEach(c => c.classList.remove('active'));
+                    this.classList.add('active');
+                    document.querySelector('.code-tab-content[data-codetab="' + tabId + '"]').classList.add('active');
+                }});
+            }});
+            function copyCodeTab(btn, tabId) {{
+                const pre = btn.parentElement.querySelector('pre');
+                const text = pre.textContent || pre.innerText;
+                navigator.clipboard.writeText(text).then(() => {{
+                    btn.textContent = 'Copied!';
+                    btn.style.background = '#22c55e';
+                    btn.style.color = '#fff';
+                    setTimeout(() => {{
+                        btn.textContent = 'Copy';
+                        btn.style.background = '';
+                        btn.style.color = '';
+                    }}, 1500);
+                }});
+            }}
+            // --- Mini-wizard: update all code-param spans when inputs change ---
+            const wizFields = ['account', 'user', 'role', 'database', 'schema', 'pipe'];
+            function updateCodeParams() {{
+                wizFields.forEach(field => {{
+                    const input = document.getElementById('wiz_' + field);
+                    if (!input) return;
+                    const val = input.value.trim() || input.placeholder;
+                    document.querySelectorAll('.code-param[data-field="' + field + '"]').forEach(span => {{
+                        span.textContent = val;
+                    }});
+                }});
+            }}
+            // Wire up all wizard inputs
+            document.querySelectorAll('#codeWizard input').forEach(input => {{
+                input.addEventListener('input', updateCodeParams);
+            }});
+            // Initialize on load
+            updateCodeParams();
+            </script>
+    '''
+
+
 def get_material_icon(name: str, size: str = "24px", color: str = "#e2e8f0") -> str:
     return f'<span class="material-symbols-outlined" style="font-size:{size};color:{color};vertical-align:middle;">{name}</span>'
 
@@ -2353,6 +2720,143 @@ def get_base_styles():
             font-weight: 600;
         }
         
+        /* Code Showcase Panel */
+        .code-showcase { margin-top: 24px; }
+        .code-showcase .panel-body { padding: 0; }
+        .code-showcase-toggle {
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            user-select: none;
+        }
+        .code-showcase-toggle .chevron {
+            transition: transform 0.2s ease;
+            font-size: 20px;
+            color: #64748b;
+        }
+        .code-showcase-toggle .chevron.open { transform: rotate(180deg); }
+        .code-tabs {
+            display: flex;
+            gap: 0;
+            border-bottom: 1px solid #334155;
+            background: #0f172a;
+            border-radius: 8px 8px 0 0;
+            overflow-x: auto;
+        }
+        .code-tab-btn {
+            padding: 10px 18px;
+            background: transparent;
+            border: none;
+            color: #64748b;
+            font-size: 0.8rem;
+            font-weight: 500;
+            cursor: pointer;
+            white-space: nowrap;
+            border-bottom: 2px solid transparent;
+            transition: all 0.15s ease;
+        }
+        .code-tab-btn:hover { color: #e2e8f0; background: #1e293b; }
+        .code-tab-btn.active {
+            color: #38bdf8;
+            border-bottom-color: #38bdf8;
+            background: #1e293b;
+        }
+        .code-tab-content {
+            display: none;
+            position: relative;
+        }
+        .code-tab-content.active { display: block; }
+        .code-tab-content pre {
+            background: #0f172a;
+            margin: 0;
+            padding: 16px 20px;
+            border-radius: 0 0 8px 8px;
+            font-size: 0.78rem;
+            overflow-x: auto;
+            color: #e2e8f0;
+            border: 1px solid #334155;
+            border-top: none;
+            line-height: 1.6;
+            font-family: 'SF Mono', 'Fira Code', 'Monaco', monospace;
+        }
+        .code-tab-annotation {
+            padding: 10px 16px;
+            font-size: 0.8rem;
+            color: #94a3b8;
+            background: #1e293b;
+            border-left: 1px solid #334155;
+            border-right: 1px solid #334155;
+        }
+        .code-copy-btn {
+            position: absolute;
+            top: 8px;
+            right: 12px;
+            background: #334155;
+            border: none;
+            color: #94a3b8;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            cursor: pointer;
+            z-index: 2;
+            transition: all 0.15s ease;
+        }
+        .code-copy-btn:hover { background: #475569; color: #e2e8f0; }
+        .code-line-count {
+            display: inline-block;
+            margin-left: 8px;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 0.7rem;
+            font-weight: 600;
+            background: #1e293b;
+            color: #64748b;
+        }
+        .code-wizard {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 8px;
+            padding: 12px 16px;
+            background: #0f172a;
+            border-bottom: 1px solid #1e293b;
+        }
+        .code-wizard label {
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+            font-size: 0.7rem;
+            color: #64748b;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .code-wizard input {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 4px;
+            color: #e2e8f0;
+            padding: 5px 8px;
+            font-size: 0.8rem;
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            outline: none;
+            transition: border-color 0.15s ease;
+        }
+        .code-wizard input:focus { border-color: #f59e0b; }
+        .code-wizard input::placeholder { color: #475569; }
+        .code-param {
+            color: #f59e0b;
+            background: rgba(245, 158, 11, 0.1);
+            padding: 0 2px;
+            border-radius: 2px;
+        }
+        .code-doc-link {
+            color: #f59e0b;
+            text-decoration: none;
+            font-weight: 500;
+            transition: opacity 0.15s;
+        }
+        .code-doc-link:hover { text-decoration: underline; opacity: 0.85; }
+        
         .volume-slider-container {
             background: var(--color-bg-primary);
             border: 1px solid var(--color-border-subtle);
@@ -2587,7 +3091,7 @@ async def generate_page(
     template: str = "SE Demo",
     mode: str = "batch",
     fleet: str = "Demo (1K)",
-    data_flow: str = "snowflake_streaming",
+    data_flow: str = "streaming_insert",
     service_area: str = "TEXAS_GULF_COAST",
     rows_per_sec: int = 1000,
     batch_size_mb: int = 10,
@@ -2598,7 +3102,7 @@ async def generate_page(
     area_cfg = UTILITY_PROFILES.get(service_area, UTILITY_PROFILES['TEXAS_GULF_COAST'])
     
     # Get the selected data flow config (or default)
-    flow_cfg = DATA_FLOWS.get(data_flow, DATA_FLOWS['snowflake_streaming'])
+    flow_cfg = DATA_FLOWS.get(data_flow, DATA_FLOWS['streaming_insert'])
     mechanism = flow_cfg['mechanism']  # Extract for backward compatibility
     dest = flow_cfg['dest']
     
@@ -2652,6 +3156,8 @@ async def generate_page(
                 <span class="card-latency" style="background: {cfg['color']}20; color: {cfg['color']}">{cfg['latency']}</span>
             </div>
             <div class="card-desc">{cfg['desc']}</div>
+            {'<div style="margin-top: 6px; font-size: 0.8rem; color: #94a3b8;">' + get_material_icon('speed', '14px', '#94a3b8') + ' ' + cfg['throughput'] + ' &nbsp;|&nbsp; ' + cfg['billing'] + '</div>' if cfg.get('throughput') else ''}
+            {'<span style="display: inline-block; margin-top: 8px; padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: 600; background: ' + cfg['color'] + '20; color: ' + cfg['color'] + ';">' + cfg['badge'] + '</span>' if cfg.get('badge') else ''}
         </div>
         '''
     
@@ -2674,16 +3180,33 @@ async def generate_page(
         
         sdk_limits_html = ""
         if mechanism in ['snowpipe_classic', 'snowpipe_hp']:
+            if mechanism == 'snowpipe_hp':
+                sdk_info_title = f"{get_material_icon('rocket_launch', '20px', '#f59e0b')} HP Snowpipe Streaming SDK"
+                sdk_info_color = '#f59e0b'
+                sdk_info_desc = (
+                    'High-Performance SDK streams via PIPE objects with server-side validation. '
+                    'Up to <b>10 GB/s per table</b>. Requires key-pair auth and pre-created PIPE. '
+                    'Throughput-based billing.'
+                )
+                sdk_max_throughput_label = '10 GB/s (HP SDK)'
+            else:
+                sdk_info_title = f"{get_material_icon('bolt', '20px', '#22c55e')} SQL INSERT via Snowpark"
+                sdk_info_color = '#22c55e'
+                sdk_info_desc = (
+                    'SQL INSERT via Snowpark session — throughput depends on warehouse size '
+                    '(XL &asymp; 25 MB/s). Rows are buffered client-side and inserted in batches. '
+                    'No PIPE object or key-pair auth required. Warehouse credits billing.'
+                )
+                sdk_max_throughput_label = 'Warehouse-dependent'
             sdk_limits_html = f'''
             <div class="section-header">
                 <span class="section-num">6</span>
                 Snowpipe SDK Volume Configuration
             </div>
             <div class="info-box blue">
-                <div class="title" style="color: #38bdf8;">{get_material_icon('tune', '20px', '#38bdf8')} SDK Throughput Settings</div>
+                <div class="title" style="color: {sdk_info_color};">{sdk_info_title}</div>
                 <div class="desc">
-                    Configure ingestion rate based on Snowpipe Streaming SDK capabilities. 
-                    High-Performance SDK supports up to <b>10 GB/s per table</b>. 
+                    {sdk_info_desc}
                     Optimal batch size is <b>10-16 MB</b>.
                 </div>
             </div>
@@ -2693,9 +3216,10 @@ async def generate_page(
                     <span class="form-label">Target Rows per Second</span>
                     <span><span class="slider-value">{rows_per_sec:,}</span> <span class="slider-unit">rows/sec</span></span>
                 </div>
-                <input type="range" id="rows_per_sec" min="100" max="100000" value="{rows_per_sec}" 
+                <input type="range" id="rows_per_sec" min="100" max="100000" step="100" value="{rows_per_sec}" 
                        style="width: 100%;"
-                       onchange="updateSliderValue(this, 'rows_per_sec_val'); updateUrl();">
+                       oninput="recalcSDK();"
+                       onchange="recalcSDK(); syncSDKParams();">
                 <div style="display: flex; justify-content: space-between; color: #64748b; font-size: 0.8rem; margin-top: 4px;">
                     <span>100</span>
                     <span>50K</span>
@@ -2706,7 +3230,7 @@ async def generate_page(
             <div class="form-row">
                 <div class="form-group">
                     <label class="form-label">Batch Size (MB)</label>
-                    <select id="batch_size_mb" onchange="updateUrl();">
+                    <select id="batch_size_mb" onchange="recalcSDK(); syncSDKParams();">
                         <option value="5" {'selected' if batch_size_mb == 5 else ''}>5 MB</option>
                         <option value="10" {'selected' if batch_size_mb == 10 else ''}>10 MB (Recommended)</option>
                         <option value="16" {'selected' if batch_size_mb == 16 else ''}>16 MB (Max)</option>
@@ -2714,7 +3238,7 @@ async def generate_page(
                 </div>
                 <div class="form-group">
                     <label class="form-label">MAX_CLIENT_LAG (seconds)</label>
-                    <select id="max_client_lag" onchange="updateUrl();">
+                    <select id="max_client_lag" onchange="recalcSDK(); syncSDKParams();">
                         <option value="1" {'selected' if max_client_lag == 1 else ''}>1 sec (Default)</option>
                         <option value="5" {'selected' if max_client_lag == 5 else ''}>5 sec</option>
                         <option value="30" {'selected' if max_client_lag == 30 else ''}>30 sec (Iceberg)</option>
@@ -2725,7 +3249,7 @@ async def generate_page(
                 </div>
                 <div class="form-group">
                     <label class="form-label">Est. Throughput</label>
-                    <div style="background: #0f172a; border: 1px solid #334155; border-radius: 6px; padding: 12px; color: #22c55e; font-weight: 600;">
+                    <div id="est_throughput" style="background: #0f172a; border: 1px solid #334155; border-radius: 6px; padding: 12px; color: #22c55e; font-weight: 600;">
                         {throughput_mb_s:.2f} MB/s
                     </div>
                 </div>
@@ -2739,28 +3263,53 @@ async def generate_page(
                 </tr>
                 <tr>
                     <td>Rows per batch</td>
-                    <td class="value">{min(rows_per_sec, max_rows_per_batch):,}</td>
-                    <td>{max_rows_per_batch:,} (at {batch_size_mb}MB)</td>
+                    <td class="value" id="sdk_rows_per_batch">{min(rows_per_sec, max_rows_per_batch):,}</td>
+                    <td id="sdk_rows_limit">{max_rows_per_batch:,} (at {batch_size_mb}MB)</td>
                 </tr>
                 <tr>
                     <td>Batches per second</td>
-                    <td class="value">{batches_per_second}</td>
+                    <td class="value" id="sdk_batches_per_sec">{batches_per_second}</td>
                     <td>Depends on latency</td>
                 </tr>
                 <tr>
                     <td>Flush interval</td>
-                    <td class="value">{max_client_lag} sec</td>
+                    <td class="value" id="sdk_flush_interval">{max_client_lag} sec</td>
                     <td>1-600 sec</td>
                 </tr>
                 <tr>
                     <td>Max throughput</td>
-                    <td class="value">{throughput_mb_s:.2f} MB/s</td>
-                    <td>10 GB/s (HP SDK)</td>
+                    <td class="value" id="sdk_max_throughput">{throughput_mb_s:.2f} MB/s</td>
+                    <td>{sdk_max_throughput_label}</td>
                 </tr>
             </table>
             
             <script>
-            function updateUrl() {{
+            const ROW_SIZE_BYTES = {SNOWPIPE_SDK_LIMITS['row_size_estimate_bytes']};
+            
+            function recalcSDK() {{
+                const rps = parseInt(document.getElementById('rows_per_sec').value) || 1000;
+                const batchMB = parseInt(document.getElementById('batch_size_mb').value) || 10;
+                const lag = parseInt(document.getElementById('max_client_lag').value) || 1;
+                
+                const maxRowsPerBatch = Math.floor((batchMB * 1024 * 1024) / ROW_SIZE_BYTES);
+                const batchesPerSec = maxRowsPerBatch > 0 ? Math.max(1, Math.floor(rps / maxRowsPerBatch)) : 1;
+                const throughputMBs = (rps * ROW_SIZE_BYTES) / (1024 * 1024);
+                
+                // Update slider display value
+                document.querySelector('.slider-value').textContent = rps.toLocaleString();
+                
+                // Update throughput box
+                document.getElementById('est_throughput').textContent = throughputMBs.toFixed(2) + ' MB/s';
+                
+                // Update table
+                document.getElementById('sdk_rows_per_batch').textContent = Math.min(rps, maxRowsPerBatch).toLocaleString();
+                document.getElementById('sdk_rows_limit').textContent = maxRowsPerBatch.toLocaleString() + ' (at ' + batchMB + 'MB)';
+                document.getElementById('sdk_batches_per_sec').textContent = batchesPerSec.toLocaleString();
+                document.getElementById('sdk_flush_interval').textContent = lag + ' sec';
+                document.getElementById('sdk_max_throughput').textContent = throughputMBs.toFixed(2) + ' MB/s';
+            }}
+            
+            function syncSDKParams() {{
                 const params = new URLSearchParams(window.location.search);
                 const rowsInput = document.getElementById('rows_per_sec');
                 const batchSelect = document.getElementById('batch_size_mb');
@@ -2768,7 +3317,7 @@ async def generate_page(
                 if (rowsInput) params.set('rows_per_sec', rowsInput.value);
                 if (batchSelect) params.set('batch_size_mb', batchSelect.value);
                 if (lagSelect) params.set('max_client_lag', lagSelect.value);
-                window.location.search = params.toString();
+                window.history.replaceState(null, '', window.location.pathname + '?' + params.toString());
             }}
             </script>
             '''
@@ -3564,7 +4113,7 @@ async def generate_page(
         streaming_info = ""
     
     # Use unified data flow config for display
-    flow_display = DATA_FLOWS.get(data_flow, DATA_FLOWS['snowflake_streaming'])
+    flow_display = DATA_FLOWS.get(data_flow, DATA_FLOWS['streaming_insert'])
     
     preview_content = f'''
     <div class="panel-title">{get_material_icon('preview', '20px')} Configuration Preview</div>
@@ -3625,6 +4174,7 @@ async def generate_page(
             <input type="hidden" name="emission_pattern" id="form_emission_pattern" value="STAGGERED_REALISTIC">
             <input type="hidden" name="segment_filter" id="form_segment_filter" value="">
             <input type="hidden" name="data_format" id="form_data_format" value="{'raw_ami' if dest == 'stage' else 'standard'}">
+            <input type="hidden" name="pipe_name" id="form_pipe_name" value="AMI_STREAMING_PIPE">
             '''
         
         # Only show the generic Snowflake target section for non-stage flows
@@ -3650,6 +4200,111 @@ async def generate_page(
                     <span class="checkbox-label">Create new table</span>
                 </label>
             </div>
+            '''
+        
+        # Add HP Streaming PIPE configuration section
+        if mechanism == 'snowpipe_hp' and dest != 'stage':
+            preview_content += f'''
+            <div class="target-section" style="margin-top: 12px;">
+                <div class="target-section-title">
+                    {get_material_icon('plumbing', '16px', '#f59e0b')} Streaming PIPE
+                    <span id="hp_pipe_status" style="margin-left: 8px; font-size: 0.75rem; font-weight: 500;"></span>
+                </div>
+                <div style="color: #94a3b8; font-size: 0.8rem; margin-bottom: 8px;">
+                    HP Streaming requires a PIPE object with <code style="color: #f59e0b; background: rgba(245,158,11,0.1); padding: 1px 4px; border-radius: 3px;">DATA_SOURCE(TYPE =&gt; 'STREAMING')</code>
+                </div>
+                <input type="text" id="hp_pipe_name" value="AMI_STREAMING_PIPE" placeholder="PIPE name"
+                       oninput="document.getElementById('form_pipe_name').value = this.value;"
+                       style="margin-bottom: 8px;">
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    <button type="button" class="btn-secondary" onclick="checkOrCreateHpPipe()" 
+                            style="font-size: 0.8rem; padding: 6px 12px; white-space: nowrap;"
+                            id="hp_pipe_btn">
+                        {get_material_icon('verified', '14px', '#22c55e')} Check / Create PIPE
+                    </button>
+                    <span id="hp_pipe_msg" style="font-size: 0.8rem; color: #94a3b8;"></span>
+                </div>
+            </div>
+            <script>
+            async function checkOrCreateHpPipe() {{
+                const pipeName = document.getElementById('hp_pipe_name').value.trim();
+                const statusEl = document.getElementById('hp_pipe_status');
+                const msgEl = document.getElementById('hp_pipe_msg');
+                const btn = document.getElementById('hp_pipe_btn');
+                
+                if (!pipeName) {{
+                    msgEl.textContent = 'Enter a pipe name';
+                    msgEl.style.color = '#ef4444';
+                    return;
+                }}
+                
+                // Get target database/schema/table from the form
+                const dbEl = document.getElementById('stream_sf_database');
+                const schemaEl = document.getElementById('stream_sf_schema');
+                const tableEl = document.getElementById('stream_table');
+                const database = dbEl ? dbEl.value : '{DB}';
+                const schema = schemaEl ? schemaEl.value : '{SCHEMA_PRODUCTION}';
+                const tableName = tableEl ? tableEl.value : 'AMI_STREAMING_READINGS';
+                
+                btn.disabled = true;
+                msgEl.textContent = 'Checking...';
+                msgEl.style.color = '#94a3b8';
+                statusEl.innerHTML = '';
+                
+                try {{
+                    // Try to deploy (creates table + pipe if not exists)
+                    const formData = new FormData();
+                    formData.append('architecture', 'hp');
+                    formData.append('database', database);
+                    formData.append('schema', schema);
+                    formData.append('table_name', tableName);
+                    formData.append('pipe_name', pipeName);
+                    
+                    const resp = await fetch('/api/streaming/deploy-ddl', {{method: 'POST', body: formData}});
+                    const data = await resp.json();
+                    
+                    if (data.status === 'success') {{
+                        statusEl.innerHTML = '<span style="color: #22c55e;">&#x2713; Ready</span>';
+                        msgEl.textContent = 'PIPE exists and is configured for streaming';
+                        msgEl.style.color = '#22c55e';
+                        // Update hidden form field
+                        document.getElementById('form_pipe_name').value = pipeName;
+                    }} else if (data.status === 'partial') {{
+                        statusEl.innerHTML = '<span style="color: #f59e0b;">&#x26A0; Partial</span>';
+                        const errCount = data.errors ? data.errors.length : 0;
+                        msgEl.textContent = 'Created with ' + errCount + ' warning(s) - may already exist';
+                        msgEl.style.color = '#f59e0b';
+                        document.getElementById('form_pipe_name').value = pipeName;
+                    }} else {{
+                        statusEl.innerHTML = '<span style="color: #ef4444;">&#x2717; Error</span>';
+                        msgEl.textContent = data.message || 'Failed to create PIPE';
+                        msgEl.style.color = '#ef4444';
+                    }}
+                }} catch (err) {{
+                    statusEl.innerHTML = '<span style="color: #ef4444;">&#x2717; Error</span>';
+                    msgEl.textContent = err.message;
+                    msgEl.style.color = '#ef4444';
+                }} finally {{
+                    btn.disabled = false;
+                }}
+            }}
+            
+            // Auto-generate pipe name from table name
+            const streamTableEl = document.getElementById('stream_table');
+            if (streamTableEl) {{
+                streamTableEl.addEventListener('change', function() {{
+                    const tbl = this.value;
+                    if (tbl) {{
+                        const pipeName = tbl.split('.').pop() + '_PIPE';
+                        document.getElementById('hp_pipe_name').value = pipeName;
+                        document.getElementById('form_pipe_name').value = pipeName;
+                        // Reset status
+                        document.getElementById('hp_pipe_status').innerHTML = '';
+                        document.getElementById('hp_pipe_msg').textContent = '';
+                    }}
+                }});
+            }}
+            </script>
             '''
         
         # Add Stage target section if stage destination is selected
@@ -4738,13 +5393,13 @@ async def generate_page(
                 
                 if (!previewEl) return;
                 
-                let stageName = stageSelect?.value || '{DB}.PRODUCTION.STG_AMI_RAW';
+                let stageName = stageSelect?.value || 'FLUX_DB.PRODUCTION.STG_AMI_RAW';
                 const pipeName = pipeNameInput?.value || 'PIPE_AMI_RAW_INGEST';
                 // Use the new target_table select, fall back to legacy pipe_target_table
                 let targetTable = targetSelect?.value;
                 if (!targetTable || targetTable === '__create_new__') {{
                     const legacyInput = document.getElementById('pipe_target_table');
-                    targetTable = legacyInput?.value || `${DB}.PRODUCTION.AMI_BRONZE_RAW`;
+                    targetTable = legacyInput?.value || 'FLUX_DB.PRODUCTION.AMI_BRONZE_RAW';
                 }}
                 const autoIngest = autoIngestCheckbox?.checked ?? true;
                 const fileFormat = (formatSelect?.value || 'json').toUpperCase();
@@ -5397,6 +6052,8 @@ FILE_FORMAT = (TYPE = ${{fileFormat}});`;
                     <div class="divider"></div>
                     
                     {config_section}
+                    
+                    {_build_code_showcase_panel(mechanism)}
                 </div>
                 
                 {sidebar_html}
@@ -5422,7 +6079,7 @@ FILE_FORMAT = (TYPE = ${{fileFormat}});`;
             
             // Data flows that require stage selection (dest='stage')
             const stageBasedFlows = ['stage_landing'];
-            const currentDataFlow = params.get('data_flow') || 'snowflake_streaming';
+            const currentDataFlow = params.get('data_flow') || 'streaming_insert';
             
             // Click handler for all selectable cards
             document.querySelectorAll('[data-param]').forEach(el => {{
@@ -5475,14 +6132,10 @@ FILE_FORMAT = (TYPE = ${{fileFormat}});`;
                         reloadWithScroll(newUrl);
                     }}
                     
-                    // For data_flow changes that require different UI sections, reload smoothly
-                    if (param === 'data_flow') {{
-                        const wasStageFlow = stageBasedFlows.includes(currentDataFlow);
-                        const isStageFlow = stageBasedFlows.includes(value);
-                        // Only reload if switching TO or FROM stage-based flows (different form fields)
-                        if (wasStageFlow !== isStageFlow) {{
-                            reloadWithScroll(newUrl);
-                        }}
+                    // For data_flow changes, always reload - each flow has different server-rendered content
+                    // (HP SDK code showcase, mechanism-specific config sections, etc.)
+                    if (param === 'data_flow' && value !== currentDataFlow) {{
+                        reloadWithScroll(newUrl);
                     }}
                 }});
             }});
@@ -7128,6 +7781,7 @@ async def monitor_page():
                     <li>For Iceberg tables, use <b>30 second</b> default MAX_CLIENT_LAG for better Parquet files</li>
                 </ul>
             </div>
+            
         </div>
         
         <!--  Smart refresh indicator - shows countdown, doesn't reset page state -->
@@ -7450,7 +8104,7 @@ async def get_streaming_status():
 @app.post("/api/stream")
 async def start_stream(
     mode: str = Form(...),
-    data_flow: str = Form("snowflake_streaming"),
+    data_flow: str = Form("streaming_insert"),
     meters: int = Form(1000),
     interval: int = Form(15),
     service_area: str = Form("TEXAS_GULF_COAST"),
@@ -7467,13 +8121,15 @@ async def start_stream(
     # Stage parameters (for internal/external stage streaming)
     stage_name: str = Form(None),
     new_stage_name: str = Form(None),  # For creating new stages
-    stage_file_format: str = Form("json")
+    stage_file_format: str = Form("json"),
+    # HP Streaming PIPE parameter
+    pipe_name: str = Form("AMI_STREAMING_PIPE")
 ):
     """
     Start a streaming job with production-matched meter data.
     
     Parameters:
-    - data_flow: Unified flow choice (snowflake_task, snowflake_streaming, s3_snowpipe, dual_write)
+    - data_flow: Unified flow choice (snowflake_task, streaming_insert, streaming_hp, stage_landing, dual_write)
     - production_source: METER_INFRASTRUCTURE, AMI_METADATA_SEARCH, or SYNTHETIC
     - emission_pattern: UNIFORM, STAGGERED_REALISTIC, PARTIAL_REPORTING, DEGRADED_NETWORK
     - segment_filter: Optional filter for RESIDENTIAL, COMMERCIAL, INDUSTRIAL
@@ -7482,7 +8138,7 @@ async def start_stream(
     - stage_file_format: parquet, json, or csv
     """
     # Extract mechanism and dest from data_flow for backward compatibility
-    flow_cfg = DATA_FLOWS.get(data_flow, DATA_FLOWS['snowflake_streaming'])
+    flow_cfg = DATA_FLOWS.get(data_flow, DATA_FLOWS['streaming_insert'])
     mechanism = flow_cfg.get('mechanism', 'snowpipe_classic')
     dest = flow_cfg.get('dest', 'snowflake')
     
@@ -7726,6 +8382,7 @@ async def start_stream(
                     'target_table': full_table_name,
                     'mechanism': mechanism,
                     'sdk_type': sdk_type,
+                    'pipe_name': pipe_name,
                 }
                 
                 # Create and start streaming thread
@@ -12350,4 +13007,4 @@ async def pipes_management_page():
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8080  
+    uvicorn.run(app, host="0.0.0.0", port=8080)
