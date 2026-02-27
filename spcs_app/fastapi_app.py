@@ -403,12 +403,17 @@ def generate_ami_reading(meter_info: dict, service_area: str, emission_pattern: 
 
 def snowpipe_streaming_worker(job_id: str, config: dict):
     """
-    Background worker for Snowpipe Streaming.
-    Continuously generates and inserts AMI data at the configured rate.
+    Background worker for Snowpipe Streaming (supports both architectures).
+    
+    Classic (snowpipe_classic): SQL INSERT via Snowpark session.
+      The native Classic SDK is Java-only; this is the Python equivalent.
+    HP (snowpipe_hp): Uses snowpipe-streaming SDK with PIPE objects.
+      Requires key-pair auth and pre-created PIPE object.
     """
     global active_streaming_jobs, snowflake_session
     
-    logger.info(f"Starting Snowpipe Streaming worker for job {job_id}")
+    mechanism = config.get('mechanism', 'snowpipe_classic')
+    logger.info(f"Starting Snowpipe Streaming worker for job {job_id} (mechanism={mechanism})")
     
     meters = config.get('meters', 1000)
     rows_per_sec = config.get('rows_per_sec', 100)
@@ -424,13 +429,47 @@ def snowpipe_streaming_worker(job_id: str, config: dict):
         'batches_sent': 0,
         'errors': 0,
         'start_time': datetime.now(),
-        'last_batch_time': None
+        'last_batch_time': None,
+        'mechanism': mechanism,
     }
     
     with streaming_lock:
         if job_id in active_streaming_jobs:
             active_streaming_jobs[job_id]['stats'] = stats
             active_streaming_jobs[job_id]['status'] = 'RUNNING'
+    
+    # Initialize HP SDK client if using HP architecture
+    hp_client = None
+    if mechanism == 'snowpipe_hp':
+        try:
+            from snowpipe_streaming_impl import HPStreamingClient, SnowpipeStreamingConfig
+            hp_config = SnowpipeStreamingConfig(
+                architecture='hp',
+                pipe_name=config.get('pipe_name', 'AMI_STREAMING_PIPE'),
+                client_name=f'flux_hp_{job_id}',
+                channel_name=f'flux_channel_{job_id}',
+            )
+            hp_client = HPStreamingClient(hp_config)
+            if not hp_client.initialize():
+                logger.error(f"Job {job_id}: Failed to initialize HP SDK client, falling back to SQL INSERT")
+                hp_client = None
+                mechanism = 'snowpipe_classic'
+                with streaming_lock:
+                    if job_id in active_streaming_jobs:
+                        active_streaming_jobs[job_id]['stats']['mechanism'] = 'snowpipe_classic (fallback)'
+            else:
+                logger.info(f"Job {job_id}: HP SDK client initialized successfully")
+        except ImportError:
+            logger.error(f"Job {job_id}: snowpipe-streaming not installed, falling back to SQL INSERT")
+            hp_client = None
+            mechanism = 'snowpipe_classic'
+            with streaming_lock:
+                if job_id in active_streaming_jobs:
+                    active_streaming_jobs[job_id]['stats']['mechanism'] = 'snowpipe_classic (fallback)'
+        except Exception as e:
+            logger.error(f"Job {job_id}: HP init error: {e}, falling back to SQL INSERT")
+            hp_client = None
+            mechanism = 'snowpipe_classic'
     
     # Load meter fleet from production or generate synthetic
     meter_fleet = []
@@ -487,6 +526,7 @@ def snowpipe_streaming_worker(job_id: str, config: dict):
     
     # Calculate timing
     batch_interval = batch_size / max(rows_per_sec, 1)  # seconds between batches
+    batch_counter = 0
     
     # Main streaming loop
     while True:
@@ -508,32 +548,16 @@ def snowpipe_streaming_worker(job_id: str, config: dict):
                 reading = generate_ami_reading(meter, service_area, emission_pattern)
                 batch.append(reading)
             
-            session = get_valid_session()
-            if batch and session:
-                # Build INSERT statement with VALUES
-                columns = list(batch[0].keys())
-                col_str = ', '.join(columns)
-                
-                values_list = []
-                for row in batch:
-                    vals = []
-                    for col in columns:
-                        v = row[col]
-                        if v is None:
-                            vals.append('NULL')
-                        elif isinstance(v, bool):
-                            vals.append('TRUE' if v else 'FALSE')
-                        elif isinstance(v, (int, float)):
-                            vals.append(str(v))
-                        elif isinstance(v, datetime):
-                            vals.append(f"'{v.strftime('%Y-%m-%d %H:%M:%S')}'")
-                        else:
-                            vals.append(f"'{str(v)}'")
-                    values_list.append(f"({', '.join(vals)})")
-                
-                # Execute batch insert
-                insert_sql = f"INSERT INTO {target_table} ({col_str}) VALUES {', '.join(values_list)}"
-                session.sql(insert_sql).collect()
+            if not batch:
+                time.sleep(max(batch_interval, 0.1))
+                continue
+            
+            batch_counter += 1
+            
+            if mechanism == 'snowpipe_hp' and hp_client:
+                # HP Architecture: Use SDK append_rows
+                offset_token = f"{job_id}_batch_{batch_counter}"
+                hp_client.write_rows(batch, offset_token=offset_token)
                 
                 # Update stats
                 with streaming_lock:
@@ -542,7 +566,43 @@ def snowpipe_streaming_worker(job_id: str, config: dict):
                         active_streaming_jobs[job_id]['stats']['batches_sent'] += 1
                         active_streaming_jobs[job_id]['stats']['last_batch_time'] = datetime.now()
                 
-                logger.debug(f"Job {job_id}: Inserted {len(batch)} rows")
+                logger.debug(f"Job {job_id}: HP SDK wrote {len(batch)} rows (offset: {offset_token})")
+            else:
+                # Classic Architecture: SQL INSERT via Snowpark session
+                session = get_valid_session()
+                if session:
+                    columns = list(batch[0].keys())
+                    col_str = ', '.join(columns)
+                    
+                    values_list = []
+                    for row in batch:
+                        vals = []
+                        for col in columns:
+                            v = row[col]
+                            if v is None:
+                                vals.append('NULL')
+                            elif isinstance(v, bool):
+                                vals.append('TRUE' if v else 'FALSE')
+                            elif isinstance(v, (int, float)):
+                                vals.append(str(v))
+                            elif isinstance(v, datetime):
+                                vals.append(f"'{v.strftime('%Y-%m-%d %H:%M:%S')}'")
+                            else:
+                                safe_val = str(v).replace("'", "''")
+                                vals.append(f"'{safe_val}'")
+                        values_list.append(f"({', '.join(vals)})")
+                    
+                    insert_sql = f"INSERT INTO {target_table} ({col_str}) VALUES {', '.join(values_list)}"
+                    session.sql(insert_sql).collect()
+                    
+                    # Update stats
+                    with streaming_lock:
+                        if job_id in active_streaming_jobs:
+                            active_streaming_jobs[job_id]['stats']['total_rows'] += len(batch)
+                            active_streaming_jobs[job_id]['stats']['batches_sent'] += 1
+                            active_streaming_jobs[job_id]['stats']['last_batch_time'] = datetime.now()
+                    
+                    logger.debug(f"Job {job_id}: Classic SQL INSERT {len(batch)} rows")
             
             # Sleep for batch interval
             time.sleep(max(batch_interval, 0.1))
@@ -554,7 +614,15 @@ def snowpipe_streaming_worker(job_id: str, config: dict):
                     active_streaming_jobs[job_id]['stats']['errors'] += 1
             time.sleep(1)  # Back off on error
     
-    logger.info(f"Snowpipe Streaming worker for job {job_id} finished")
+    # Cleanup HP client if used
+    if hp_client:
+        try:
+            hp_client.close()
+            logger.info(f"Job {job_id}: HP SDK client closed")
+        except Exception as e:
+            logger.error(f"Job {job_id}: Error closing HP client: {e}")
+    
+    logger.info(f"Snowpipe Streaming worker for job {job_id} finished (mechanism={mechanism})")
 
 
 def raw_json_s3_streaming_worker(job_id: str, config: dict):
@@ -11195,9 +11263,10 @@ async def generate_streaming_ddl(
             )
             arch_info = {
                 "architecture": "classic",
-                "name": "Snowpipe Classic SDK",
+                "name": "Classic (SQL INSERT via Snowpark)",
                 "requires_pipe": False,
-                "package": "snowflake-ingest"
+                "sdk": "snowflake-snowpark-python",
+                "note": "Classic SDK is Java-only; this uses SQL INSERT as the Python equivalent"
             }
         elif architecture.lower() in ('hp', 'snowpipe_hp', 'high_performance'):
             ddl = generate_hp_streaming_ddl(
@@ -11210,9 +11279,9 @@ async def generate_streaming_ddl(
             )
             arch_info = {
                 "architecture": "hp",
-                "name": "Snowpipe HP SDK",
+                "name": "High-Performance Snowpipe Streaming",
                 "requires_pipe": True,
-                "package": "snowpipe-streaming"
+                "sdk": "snowpipe-streaming"
             }
         else:
             return JSONResponse(
@@ -11323,27 +11392,28 @@ async def check_streaming_prerequisites(architecture: str):
         "prerequisites": []
     }
     
-    # Check for Classic SDK
+    # Check for Classic architecture prerequisites
     if architecture.lower() in ('classic', 'snowpipe_classic', 'all'):
         try:
-            from snowflake.ingest import SimpleIngestManager
+            from snowflake.snowpark import Session as _SnowparkSession
             result["prerequisites"].append({
-                "name": "snowflake-ingest",
+                "name": "snowflake-snowpark-python",
                 "status": "installed",
-                "required_for": "Classic Architecture"
+                "required_for": "Classic Architecture (SQL INSERT path)",
+                "note": "Classic SDK is Java-only; Snowpark SQL INSERT is the Python equivalent"
             })
         except ImportError:
             result["prerequisites"].append({
-                "name": "snowflake-ingest",
+                "name": "snowflake-snowpark-python",
                 "status": "missing",
-                "install_cmd": "pip install snowflake-ingest",
-                "required_for": "Classic Architecture"
+                "install_cmd": "pip install snowflake-snowpark-python",
+                "required_for": "Classic Architecture (SQL INSERT path)"
             })
     
     # Check for HP SDK
     if architecture.lower() in ('hp', 'snowpipe_hp', 'high_performance', 'all'):
         try:
-            from snowpipe_streaming import SnowpipeStreamingClient
+            from snowflake.ingest.streaming import StreamingIngestClient as _HPClient
             result["prerequisites"].append({
                 "name": "snowpipe-streaming",
                 "status": "installed",
@@ -11411,111 +11481,116 @@ async def get_python_client_code(
     Generate Python client code for streaming data using the selected architecture.
     """
     if architecture.lower() in ('classic', 'snowpipe_classic'):
-        code = f'''"""
-Classic Snowpipe Streaming Client
-Direct table channels - no PIPE object required
+        try:
+            from snowpipe_streaming_impl import get_classic_python_client_code
+            code = get_classic_python_client_code(database, schema, table_name)
+        except ImportError:
+            code = f'''"""
+Classic Snowpipe Streaming - SQL INSERT via Snowpark
+
+NOTE: The native Classic Snowpipe Streaming SDK is Java-only (snowflake-ingest-sdk).
+For Python applications, SQL INSERT via Snowpark session is the equivalent approach.
+No PIPE object required - data is written directly to the table.
 """
-import os
+from snowflake.snowpark import Session
+
+connection_params = {{
+    "account": "your_account",
+    "user": "your_user",
+    "password": "your_password",
+    "role": "SYSADMIN",
+    "warehouse": "FLUX_WH",
+    "database": "{database}",
+    "schema": "{schema}",
+}}
+session = Session.builder.configs(connection_params).create()
+
+rows = [
+    {{"METER_ID": "MTR-001", "READING_TIMESTAMP": "2026-01-17 12:00:00", "USAGE_KWH": 1.5}},
+    {{"METER_ID": "MTR-002", "READING_TIMESTAMP": "2026-01-17 12:00:00", "USAGE_KWH": 2.1}},
+]
+
+columns = list(rows[0].keys())
+col_str = ", ".join(columns)
+values_parts = []
+for row in rows:
+    vals = ", ".join(f"\\'{v}\\'" if isinstance(v, str) else str(v) for v in row.values())
+    values_parts.append(f"({{vals}})")
+
+insert_sql = f"INSERT INTO {database}.{schema}.{table_name} ({{col_str}}) VALUES {{\\', \\'.join(values_parts)}}"
+session.sql(insert_sql).collect()
+print(f"Inserted {{len(rows)}} rows via SQL INSERT")
+
+session.close()
+'''
+        deps = ["snowflake-snowpark-python"]
+    else:
+        try:
+            from snowpipe_streaming_impl import get_hp_python_client_code
+            code = get_hp_python_client_code(database, schema, pipe_name)
+        except ImportError:
+            code = f'''"""
+High-Performance Snowpipe Streaming Client
+
+Requires: pip install snowpipe-streaming
+Auth: Key pair (JWT/RSA) required
+PIPE object must exist before streaming (run DDL first)
+"""
 from snowflake.ingest.streaming import StreamingIngestClient
 
-# Configuration
-config = {{
-    'account': os.environ['SNOWFLAKE_ACCOUNT'],
-    'user': os.environ['SNOWFLAKE_USER'],
-    'private_key': open('/path/to/rsa_key.p8').read(),
-    'role': os.environ.get('SNOWFLAKE_ROLE', 'SYSADMIN'),
-    'database': '{database}',
-    'schema': '{schema}',
+ACCOUNT = 'your_account_id'
+USER = 'your_username'
+DATABASE = '{database}'
+SCHEMA = '{schema}'
+PIPE_NAME = '{pipe_name}'
+
+with open('rsa_key.p8', 'r') as f:
+    private_key = f.read()
+
+properties = {{
+    'url': f'https://{{ACCOUNT}}.snowflakecomputing.com',
+    'account': ACCOUNT,
+    'user': USER,
+    'private_key': private_key,
+    'role': 'SYSADMIN',
+    'authorization_type': 'JWT',
 }}
 
-# Create client
 client = StreamingIngestClient(
-    client_name='flux_classic_client',
-    properties=config
+    client_name='my_streaming_client',
+    db_name=DATABASE,
+    schema_name=SCHEMA,
+    pipe_name=PIPE_NAME,
+    properties=properties,
 )
 
-# Open channel (direct to table - Classic architecture)
-channel, status = client.open_channel(
-    channel_name='flux_classic_channel',
-    table_name='{table_name}'  # Direct to table, no PIPE
-)
-print(f"Channel opened with status: {{status}}")
+channel, status = client.open_channel(channel_name='my_channel')
+print(f"Channel opened: {{status.status_code}}")
 
-# Write data
-sample_rows = [
-    {{'METER_ID': 'MTR-001', 'READING_TIMESTAMP': '2026-01-17T12:00:00', 'USAGE_KWH': 1.5}},
-    {{'METER_ID': 'MTR-002', 'READING_TIMESTAMP': '2026-01-17T12:00:00', 'USAGE_KWH': 2.1}},
+rows = [
+    {{"METER_ID": "MTR-001", "READING_TIMESTAMP": "2026-01-17T12:00:00", "USAGE_KWH": 1.5}},
+    {{"METER_ID": "MTR-002", "READING_TIMESTAMP": "2026-01-17T12:00:00", "USAGE_KWH": 2.1}},
 ]
-channel.insert_rows(sample_rows)
-print(f"Wrote {{len(sample_rows)}} rows")
+channel.append_rows(rows=rows, start_offset_token="batch_1", end_offset_token="batch_1")
 
-# Close when done
+channel.initiate_flush()
+channel.wait_for_flush(timeout_seconds=30)
+
+statuses = client.get_channel_statuses(["my_channel"])
+ch_status = statuses["my_channel"]
+print(f"Rows inserted: {{ch_status.rows_inserted}}")
+
 channel.close()
 client.close()
-print("Client closed")
 '''
-    else:
-        code = f'''"""
-High-Performance (HP) Snowpipe Streaming Client
-PIPE object based - up to 10GB/s throughput
-"""
-import os
-from snowpipe_streaming import SnowpipeStreamingClient
-
-# Configuration (uses profile.json or direct parameters)
-# Option 1: Profile file
-# client = SnowpipeStreamingClient(
-#     client_name='flux_hp_client',
-#     db_name='{database}',
-#     schema_name='{schema}',
-#     pipe_name='{pipe_name}',
-#     profile_json='profile.json'  # Contains account, user, private_key_file
-# )
-
-# Option 2: Direct parameters
-client = SnowpipeStreamingClient(
-    client_name='flux_hp_client',
-    account=os.environ['SNOWFLAKE_ACCOUNT'],
-    user=os.environ['SNOWFLAKE_USER'],
-    private_key=open('/path/to/rsa_key.p8').read(),
-    role=os.environ.get('SNOWFLAKE_ROLE', 'SYSADMIN'),
-    database='{database}',
-    schema='{schema}',
-    pipe='{pipe_name}'  # HP requires PIPE object
-)
-
-# Open channel (HP architecture)
-channel, status = client.open_channel(channel_name='flux_hp_channel')
-print(f"HP Channel opened with status: {{status}}")
-
-# Write data (batch append supported)
-sample_rows = [
-    {{'METER_ID': 'MTR-001', 'READING_TIMESTAMP': '2026-01-17T12:00:00', 'USAGE_KWH': 1.5}},
-    {{'METER_ID': 'MTR-002', 'READING_TIMESTAMP': '2026-01-17T12:00:00', 'USAGE_KWH': 2.1}},
-]
-channel.append_rows(sample_rows)
-print(f"Wrote {{len(sample_rows)}} rows via HP streaming")
-
-# Get committed offset (verify data landed)
-offset = channel.get_latest_committed_offset_token()
-print(f"Latest committed offset: {{offset}}")
-
-# Close when done
-channel.close()
-client.close()
-print("HP Client closed")
-
-# ==============================================================================
-# IMPORTANT: HP Architecture requires PIPE object to be created first!
-# Run the DDL from /api/streaming/generate-ddl?architecture=hp before streaming.
-# ==============================================================================
-'''
+        deps = ["snowpipe-streaming"]
     
     return {
         "architecture": architecture,
         "language": "python",
         "code": code,
-        "dependencies": ["snowflake-ingest"] if architecture.lower() in ('classic', 'snowpipe_classic') else ["snowpipe-streaming"]
+        "dependencies": deps,
+        "note": "Classic SDK is Java-only; Classic Python code uses Snowpark SQL INSERT" if architecture.lower() in ('classic', 'snowpipe_classic') else "HP SDK requires key-pair auth and PIPE object"
     }
 
 

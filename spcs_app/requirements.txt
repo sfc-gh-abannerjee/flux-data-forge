@@ -7,6 +7,10 @@ python-multipart>=0.0.6
 snowflake-connector-python>=3.6.0
 snowflake-snowpark-python>=1.11.0
 
+# Snowpipe Streaming HP SDK (High-Performance architecture)
+# Rust core, Python bindings - requires key-pair auth and PIPE objects
+snowpipe-streaming>=0.6.0
+
 # AWS S3 for raw JSON streaming
 boto3>=1.34.0
 

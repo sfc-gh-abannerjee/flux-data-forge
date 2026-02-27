@@ -65,11 +65,18 @@ class TestSnowpipeStreamingImpl:
     
     def test_streaming_info_constants(self):
         """Test streaming info constants"""
-        from snowpipe_streaming_impl import STREAMING_INFO
+        from snowpipe_streaming_impl import STREAMING_INFO, ARCHITECTURE_INFO
         
-        assert STREAMING_INFO['name'] == 'Snowpipe Streaming'
-        assert STREAMING_INFO['latency'] == '< 5 seconds'
+        # STREAMING_INFO is backward-compatible alias for ARCHITECTURE_INFO['hp']
+        assert STREAMING_INFO['name'] == 'High-Performance Snowpipe Streaming'
         assert STREAMING_INFO['requires_pipe'] == True
+        assert STREAMING_INFO['python_sdk_available'] == True
+        
+        # Verify both architectures exist
+        assert 'classic' in ARCHITECTURE_INFO
+        assert 'hp' in ARCHITECTURE_INFO
+        assert ARCHITECTURE_INFO['classic']['requires_pipe'] == False
+        assert ARCHITECTURE_INFO['hp']['requires_pipe'] == True
 
 
 class TestConfigurationFiles:
