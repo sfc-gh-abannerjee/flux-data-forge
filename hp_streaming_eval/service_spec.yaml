@@ -1,0 +1,20 @@
+spec:
+  containers:
+    - name: hp-streaming-eval
+      image: /flux_db/applications/flux_repo/hp_streaming_eval:latest
+      env:
+        PORT: "8090"
+      resources:
+        requests:
+          cpu: "1"
+          memory: "2Gi"
+        limits:
+          cpu: "2"
+          memory: "4Gi"
+      readinessProbe:
+        port: 8090
+        path: /
+  endpoints:
+    - name: hp-eval
+      port: 8090
+      public: true
