@@ -7,6 +7,7 @@
 *.key
 rsa_key.*
 secrets/
+.local_test/
 
 # Python
 __pycache__/

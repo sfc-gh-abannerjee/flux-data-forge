@@ -73,10 +73,13 @@ class TestSnowpipeStreamingImpl:
         assert STREAMING_INFO['python_sdk_available'] == True
         
         # Verify both architectures exist
-        assert 'classic' in ARCHITECTURE_INFO
+        assert 'sql_insert' in ARCHITECTURE_INFO
         assert 'hp' in ARCHITECTURE_INFO
-        assert ARCHITECTURE_INFO['classic']['requires_pipe'] == False
+        assert ARCHITECTURE_INFO['sql_insert']['requires_pipe'] == False
         assert ARCHITECTURE_INFO['hp']['requires_pipe'] == True
+        
+        # Backward-compat: 'classic' alias should still work
+        assert 'classic' in ARCHITECTURE_INFO
 
 
 class TestConfigurationFiles:
@@ -231,3 +234,209 @@ class TestDataGeneration:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ============================================================================
+# MOCK TESTS FOR STREAMING CLIENTS AND WORKERS
+# ============================================================================
+
+class TestSqlInsertClient:
+    """Mock tests for SqlInsertClient (no Snowflake connection needed)"""
+
+    def test_sql_insert_client_import(self):
+        """SqlInsertClient should be importable"""
+        from snowpipe_streaming_impl import SqlInsertClient
+        assert SqlInsertClient is not None
+
+    def test_backward_compat_alias(self):
+        """ClassicStreamingClient should alias to SqlInsertClient"""
+        from snowpipe_streaming_impl import SqlInsertClient, ClassicStreamingClient
+        assert ClassicStreamingClient is SqlInsertClient
+
+    def test_sql_insert_client_init_without_session(self):
+        """SqlInsertClient.initialize() should fail without a Snowpark session"""
+        from snowpipe_streaming_impl import SqlInsertClient, SnowpipeStreamingConfig
+
+        config = SnowpipeStreamingConfig(
+            account="test", user="test", database="DB", schema="SCH",
+            table="TBL", architecture="sql_insert",
+        )
+        client = SqlInsertClient(config, session=None)
+        result = client.initialize()
+        assert result is False
+        assert client.is_initialized is False
+
+    def test_sql_insert_client_write_rows_without_init(self):
+        """write_rows should raise RuntimeError when not initialized"""
+        from snowpipe_streaming_impl import SqlInsertClient, SnowpipeStreamingConfig
+
+        config = SnowpipeStreamingConfig(
+            account="test", user="test", database="DB", schema="SCH",
+            table="TBL", architecture="sql_insert",
+        )
+        client = SqlInsertClient(config, session=None)
+
+        with pytest.raises(RuntimeError, match="SQL INSERT streaming client not initialized"):
+            client.write_rows([{"METER_ID": "M1"}])
+
+    def test_sql_insert_client_write_empty_rows(self):
+        """write_rows with empty list should return 0"""
+        from snowpipe_streaming_impl import SqlInsertClient, SnowpipeStreamingConfig
+
+        config = SnowpipeStreamingConfig(
+            account="test", user="test", database="DB", schema="SCH",
+            table="TBL", architecture="sql_insert",
+        )
+        client = SqlInsertClient(config, session=None)
+        # Bypass init check for empty rows
+        result = client.write_rows([])
+        assert result == 0
+
+    def test_sql_insert_flush_is_noop(self):
+        """flush() should return True immediately for SQL INSERT"""
+        from snowpipe_streaming_impl import SqlInsertClient, SnowpipeStreamingConfig
+
+        config = SnowpipeStreamingConfig(
+            account="test", user="test", database="DB", schema="SCH",
+            table="TBL", architecture="sql_insert",
+        )
+        client = SqlInsertClient(config, session=None)
+        assert client.flush() is True
+
+
+class TestStreamingFactory:
+    """Tests for the create_streaming_client factory function"""
+
+    def test_factory_accepts_sql_insert(self):
+        """Factory should accept 'sql_insert' architecture"""
+        from snowpipe_streaming_impl import create_streaming_client, SqlInsertClient, SnowpipeStreamingConfig
+
+        config = SnowpipeStreamingConfig(
+            account="test", user="test", database="DB", schema="SCH",
+            table="TBL", architecture="sql_insert",
+        )
+        client = create_streaming_client(config)
+        assert isinstance(client, SqlInsertClient)
+
+    def test_factory_accepts_classic_alias(self):
+        """Factory should accept 'classic' as backward-compat alias"""
+        from snowpipe_streaming_impl import create_streaming_client, SqlInsertClient, SnowpipeStreamingConfig
+
+        config = SnowpipeStreamingConfig(
+            account="test", user="test", database="DB", schema="SCH",
+            table="TBL", architecture="classic",
+        )
+        client = create_streaming_client(config)
+        assert isinstance(client, SqlInsertClient)
+
+    def test_factory_hp_architecture(self):
+        """Factory should return HPStreamingClient for 'hp' architecture"""
+        from snowpipe_streaming_impl import create_streaming_client, HPStreamingClient, SnowpipeStreamingConfig
+
+        config = SnowpipeStreamingConfig(
+            account="test", user="test", database="DB", schema="SCH",
+            table="TBL", pipe_name="PIPE", architecture="hp",
+        )
+        client = create_streaming_client(config)
+        assert isinstance(client, HPStreamingClient)
+
+
+class TestWorkerRowMapping:
+    """Tests for the 12-column row mapping used in EventHub/PubSub workers"""
+
+    REQUIRED_COLUMNS = [
+        "METER_ID", "READING_TIMESTAMP", "USAGE_KWH", "VOLTAGE",
+        "TEMPERATURE_C", "SERVICE_AREA", "CUSTOMER_SEGMENT",
+        "TRANSFORMER_ID", "SUBSTATION_ID", "IS_OUTAGE",
+        "DATA_QUALITY", "INGESTION_TIMESTAMP",
+    ]
+
+    def _make_row(self, body, ts, prefix="TEST"):
+        """Replicate the worker row mapping logic"""
+        return {
+            "METER_ID": str(body.get("meter_id", body.get("device_id", body.get("id", f"{prefix}-UNKNOWN")))),
+            "READING_TIMESTAMP": str(body.get("reading_ts", body.get("timestamp", ts))),
+            "USAGE_KWH": float(body.get("reading_value", body.get("value", body.get("usage_kwh", 0)))),
+            "VOLTAGE": float(body.get("voltage", 120.0)),
+            "TEMPERATURE_C": float(body.get("temperature_c", body.get("temperature", 25.0))),
+            "SERVICE_AREA": str(body.get("service_area", "UNKNOWN")),
+            "CUSTOMER_SEGMENT": str(body.get("customer_segment", "RESIDENTIAL")),
+            "TRANSFORMER_ID": str(body.get("transformer_id", "")),
+            "SUBSTATION_ID": str(body.get("substation_id", "")),
+            "IS_OUTAGE": bool(body.get("is_outage", False)),
+            "DATA_QUALITY": str(body.get("quality", body.get("data_quality", "VALID"))),
+            "INGESTION_TIMESTAMP": ts,
+        }
+
+    def test_row_has_all_12_columns(self):
+        """Row mapping should produce exactly 12 columns"""
+        row = self._make_row({"meter_id": "M1", "usage_kwh": 10.5}, "2026-01-01T00:00:00Z")
+        assert len(row) == 12
+        for col in self.REQUIRED_COLUMNS:
+            assert col in row, f"Missing column: {col}"
+
+    def test_row_defaults(self):
+        """Empty body should produce sensible defaults"""
+        row = self._make_row({}, "2026-01-01T00:00:00Z", prefix="EH")
+        assert row["METER_ID"] == "EH-UNKNOWN"
+        assert row["USAGE_KWH"] == 0.0
+        assert row["VOLTAGE"] == 120.0
+        assert row["TEMPERATURE_C"] == 25.0
+        assert row["SERVICE_AREA"] == "UNKNOWN"
+        assert row["CUSTOMER_SEGMENT"] == "RESIDENTIAL"
+        assert row["IS_OUTAGE"] is False
+        assert row["DATA_QUALITY"] == "VALID"
+
+    def test_row_field_aliases(self):
+        """Row mapping should handle field name aliases"""
+        body = {
+            "device_id": "DEV-001",
+            "timestamp": "2026-06-15T12:00:00Z",
+            "value": 42.5,
+            "temperature": 30.0,
+            "quality": "ANOMALY",
+        }
+        row = self._make_row(body, "2026-06-15T12:00:00Z")
+        assert row["METER_ID"] == "DEV-001"
+        assert row["USAGE_KWH"] == 42.5
+        assert row["TEMPERATURE_C"] == 30.0
+        assert row["DATA_QUALITY"] == "ANOMALY"
+
+    def test_row_explicit_fields_override_defaults(self):
+        """Explicit fields should override defaults"""
+        body = {
+            "meter_id": "MTR-999",
+            "voltage": 121.5,
+            "service_area": "HOUSTON_SOUTH",
+            "customer_segment": "COMMERCIAL",
+            "transformer_id": "TX-100",
+            "substation_id": "SUB-50",
+            "is_outage": True,
+        }
+        row = self._make_row(body, "2026-01-01T00:00:00Z")
+        assert row["METER_ID"] == "MTR-999"
+        assert row["VOLTAGE"] == 121.5
+        assert row["SERVICE_AREA"] == "HOUSTON_SOUTH"
+        assert row["CUSTOMER_SEGMENT"] == "COMMERCIAL"
+        assert row["TRANSFORMER_ID"] == "TX-100"
+        assert row["SUBSTATION_ID"] == "SUB-50"
+        assert row["IS_OUTAGE"] is True
+
+
+class TestDDLGeneration:
+    """Tests for DDL generation after terminology rename"""
+
+    def test_sql_insert_ddl_function_exists(self):
+        """generate_sql_insert_streaming_ddl should be importable"""
+        from snowpipe_streaming_impl import generate_sql_insert_streaming_ddl
+        ddl = generate_sql_insert_streaming_ddl("DB", "SCH", "TBL")
+        assert "CREATE TABLE" in ddl
+        assert "METER_ID" in ddl
+
+    def test_classic_ddl_alias(self):
+        """generate_classic_streaming_ddl should alias to generate_sql_insert_streaming_ddl"""
+        from snowpipe_streaming_impl import (
+            generate_classic_streaming_ddl,
+            generate_sql_insert_streaming_ddl,
+        )
+        assert generate_classic_streaming_ddl is generate_sql_insert_streaming_ddl

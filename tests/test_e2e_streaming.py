@@ -153,22 +153,22 @@ def test_hp_streaming():
 
 
 # ============================================================================
-# CLASSIC STREAMING TEST (SQL INSERT via Snowpark)
+# SQL INSERT STREAMING TEST (via Snowpark)
 # ============================================================================
 
-def test_classic_streaming_via_sql():
+def test_sql_insert_streaming():
     """
-    Test Classic streaming path using direct SQL INSERT.
+    Test SQL INSERT streaming path using direct SQL INSERT.
     
-    Since ClassicStreamingClient requires a Snowpark session and we're testing
-    from the CLI (not inside SPCS), we simulate the Classic path by running
+    Since SqlInsertClient requires a Snowpark session and we're testing
+    from the CLI (not inside SPCS), we simulate the SQL INSERT path by running
     the equivalent SQL INSERT directly via the Snowflake connection.
-    This validates the same SQL pattern that ClassicStreamingClient.write_rows() uses.
+    This validates the same SQL pattern that SqlInsertClient.write_rows() uses.
     """
     print("\n" + "=" * 70)
-    print("TEST 2: Classic Streaming (SQL INSERT - equivalent path)")
+    print("TEST 2: SQL INSERT Streaming (Snowpark DataFrame path)")
     print("=" * 70)
-    print("\n  NOTE: Classic path uses SQL INSERT via Snowpark session.")
+    print("\n  NOTE: SQL INSERT path uses Snowpark DataFrame writes.")
     print("  From CLI, we test the equivalent SQL INSERT pattern directly.")
     print("  This will be tested via snowflake_sql_execute in the next step.")
     return "DEFERRED_TO_SQL"
@@ -185,10 +185,12 @@ if __name__ == "__main__":
 
     # Verify architecture info is correct
     print("\n--- Architecture Info Check ---")
-    assert "classic" in ARCHITECTURE_INFO, "Missing 'classic' in ARCHITECTURE_INFO"
+    assert "sql_insert" in ARCHITECTURE_INFO, "Missing 'sql_insert' in ARCHITECTURE_INFO"
     assert "hp" in ARCHITECTURE_INFO, "Missing 'hp' in ARCHITECTURE_INFO"
     assert ARCHITECTURE_INFO["hp"]["requires_pipe"] == True
-    assert ARCHITECTURE_INFO["classic"]["requires_pipe"] == False
+    assert ARCHITECTURE_INFO["sql_insert"]["requires_pipe"] == False
+    # Backward-compat alias
+    assert "classic" in ARCHITECTURE_INFO, "Backward-compat 'classic' alias missing"
     print("  OK: ARCHITECTURE_INFO structure valid")
 
     # Run HP test
@@ -198,8 +200,8 @@ if __name__ == "__main__":
     print("\n" + "=" * 70)
     print("RESULTS")
     print("=" * 70)
-    print(f"  HP Streaming:      {'PASS' if hp_result else 'FAIL'}")
-    print(f"  Classic Streaming:  DEFERRED (will test via SQL)")
+    print(f"  HP Streaming:         {'PASS' if hp_result else 'FAIL'}")
+    print(f"  SQL INSERT Streaming:  DEFERRED (will test via SQL)")
     print("=" * 70)
 
     sys.exit(0 if hp_result else 1)

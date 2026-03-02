@@ -45,12 +45,22 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================================
+# ENVIRONMENT DETECTION
+# ============================================================================
+
+def is_running_in_spcs() -> bool:
+    """Detect if running inside Snowpark Container Services.
+    SPCS mounts secrets at /usr/local/creds/secret_string."""
+    return os.path.exists("/usr/local/creds/secret_string")
+
+
+# ============================================================================
 # ARCHITECTURE INFO - Exported for /api/streaming/architectures endpoint
 # ============================================================================
 
 ARCHITECTURE_INFO = {
-    "classic": {
-        "name": "Classic (SQL INSERT via Snowpark)",
+    "sql_insert": {
+        "name": "SQL INSERT (via Snowpark)",
         "sdk": "snowflake-snowpark-python",
         "native_sdk": "snowflake-ingest-sdk (Java only)",
         "description": (
@@ -96,8 +106,9 @@ ARCHITECTURE_INFO = {
     },
 }
 
-# Backward-compatible alias
+# Backward-compatible aliases
 STREAMING_INFO = ARCHITECTURE_INFO["hp"]
+ARCHITECTURE_INFO["classic"] = ARCHITECTURE_INFO["sql_insert"]
 
 
 # ============================================================================
@@ -128,7 +139,7 @@ class SnowpipeStreamingConfig:
     channel_name: str = "flux_channel"
 
     # Architecture selection
-    architecture: str = "hp"  # 'classic' or 'hp'
+    architecture: str = "hp"  # 'sql_insert' or 'hp'
 
     def __post_init__(self):
         """Load environment variables if not provided"""
@@ -333,12 +344,12 @@ class HPStreamingClient:
 
 
 # ============================================================================
-# CLASSIC STREAMING CLIENT (SQL INSERT via Snowpark)
+# SQL INSERT STREAMING CLIENT (SQL INSERT via Snowpark)
 # ============================================================================
 
-class ClassicStreamingClient:
+class SqlInsertClient:
     """
-    Classic-equivalent Snowpipe Streaming client using SQL INSERT via Snowpark.
+    SQL INSERT streaming client using Snowpark.
 
     The native Classic Snowpipe Streaming SDK is Java-only (snowflake-ingest-sdk).
     This Python implementation uses Snowpark SQL INSERT as the equivalent path,
@@ -359,11 +370,11 @@ class ClassicStreamingClient:
             self._session = session
 
         if not self._session:
-            logger.error("Classic streaming requires a Snowpark session")
+            logger.error("SQL INSERT streaming requires a Snowpark session")
             return False
 
         target = f"{self.config.database}.{self.config.schema}.{self.config.table}"
-        logger.info(f"Initializing Classic (SQL INSERT) streaming to {target}")
+        logger.info(f"Initializing SQL INSERT streaming to {target}")
         self._initialized = True
         return True
 
@@ -373,71 +384,53 @@ class ClassicStreamingClient:
 
     def write_rows(self, rows: List[Dict[str, Any]], offset_token: Optional[str] = None) -> int:
         """Write rows using SQL INSERT via Snowpark session"""
-        if not self._initialized or not self._session:
-            raise RuntimeError("Classic streaming client not initialized")
-
         if not rows:
             return 0
+
+        if not self._initialized or not self._session:
+            raise RuntimeError("SQL INSERT streaming client not initialized")
 
         with self._lock:
             try:
                 target = f"{self.config.database}.{self.config.schema}.{self.config.table}"
                 columns = list(rows[0].keys())
-                col_str = ', '.join(columns)
-
-                values_list = []
-                for row in rows:
-                    vals = []
-                    for col in columns:
-                        v = row.get(col)
-                        if v is None:
-                            vals.append('NULL')
-                        elif isinstance(v, bool):
-                            vals.append('TRUE' if v else 'FALSE')
-                        elif isinstance(v, (int, float)):
-                            vals.append(str(v))
-                        elif isinstance(v, datetime):
-                            vals.append(f"'{v.strftime('%Y-%m-%d %H:%M:%S')}'")
-                        else:
-                            safe_val = str(v).replace("'", "''")
-                            vals.append(f"'{safe_val}'")
-                    values_list.append(f"({', '.join(vals)})")
-
-                insert_sql = f"INSERT INTO {target} ({col_str}) VALUES {', '.join(values_list)}"
-                self._session.sql(insert_sql).collect()
+                data = [[row.get(c) for c in columns] for row in rows]
+                df = self._session.create_dataframe(data, schema=columns)
+                df.write.mode("append").save_as_table(target)
 
                 self._rows_written += len(rows)
                 self._batches_sent += 1
                 logger.debug(
-                    f"Classic INSERT: {len(rows)} rows (total: {self._rows_written})"
+                    f"SQL INSERT: {len(rows)} rows (total: {self._rows_written})"
                 )
                 return len(rows)
 
             except Exception as e:
-                logger.error(f"Classic write_rows failed: {e}")
+                logger.error(f"SQL INSERT write_rows failed: {e}")
                 raise
 
     def flush(self, timeout_seconds: int = 30) -> bool:
-        """No-op for Classic — SQL INSERT commits immediately"""
+        """No-op for SQL INSERT — commits immediately"""
         return True
 
     def get_status(self) -> Dict[str, Any]:
         """Get current status"""
         return {
             'initialized': self._initialized,
-            'architecture': 'classic',
+            'architecture': 'sql_insert',
             'local_rows_written': self._rows_written,
             'batches_sent': self._batches_sent,
         }
 
     def close(self, wait_for_flush: bool = True, timeout_seconds: int = 30):
-        """No-op for Classic — Snowpark session is managed externally"""
+        """No-op for SQL INSERT — Snowpark session is managed externally"""
         self._initialized = False
-        logger.info("Classic streaming client closed")
+        logger.info("SQL INSERT streaming client closed")
 
 
-# Backward-compatible alias
+# Backward-compatible aliases
 SnowpipeStreamingClient = HPStreamingClient
+ClassicStreamingClient = SqlInsertClient
 
 
 # ============================================================================
@@ -460,25 +453,31 @@ def _generate_base_table_ddl(
 CREATE TABLE IF NOT EXISTS {database}.{schema}.{table_name} (
     -- Core AMI fields
     METER_ID VARCHAR(50) NOT NULL COMMENT 'Unique meter identifier',
+    TRANSFORMER_ID VARCHAR(50) COMMENT 'Associated transformer',
+    CIRCUIT_ID VARCHAR(50) COMMENT 'Associated circuit',
+    SUBSTATION_ID VARCHAR(50) COMMENT 'Associated substation',
     READING_TIMESTAMP TIMESTAMP_NTZ NOT NULL COMMENT 'Meter reading timestamp',
 
     -- Measurements
     USAGE_KWH FLOAT COMMENT '15-minute interval energy usage (kWh)',
     VOLTAGE FLOAT COMMENT 'Voltage reading (V)',
+    POWER_FACTOR FLOAT COMMENT 'Power factor (0-1)',
     TEMPERATURE_C FLOAT COMMENT 'Ambient temperature (Celsius)',
 
     -- Context
     SERVICE_AREA VARCHAR(100) COMMENT 'Service territory/region',
     CUSTOMER_SEGMENT VARCHAR(50) COMMENT 'Customer classification',
-    TRANSFORMER_ID VARCHAR(50) COMMENT 'Associated transformer',
-    SUBSTATION_ID VARCHAR(50) COMMENT 'Associated substation',
+    LATITUDE FLOAT COMMENT 'Meter latitude',
+    LONGITUDE FLOAT COMMENT 'Meter longitude',
 
     -- Status
     IS_OUTAGE BOOLEAN DEFAULT FALSE COMMENT 'Outage indicator',
     DATA_QUALITY VARCHAR(20) DEFAULT 'VALID' COMMENT 'Quality flag: VALID, ESTIMATED, OUTAGE',
+    PRODUCTION_MATCHED BOOLEAN DEFAULT FALSE COMMENT 'Production matched indicator',
+    EMISSION_PATTERN VARCHAR(20) COMMENT 'Emission pattern category',
 
     -- Metadata
-    INGESTION_TIMESTAMP TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP() COMMENT 'Snowflake ingestion timestamp'
+    CREATED_AT TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP() COMMENT 'Row creation timestamp'
 )
 CLUSTER BY (DATE_TRUNC('DAY', READING_TIMESTAMP), METER_ID)
 DATA_RETENTION_TIME_IN_DAYS = 7
@@ -488,23 +487,23 @@ COMMENT = 'Snowpipe Streaming landing table for AMI data'
 """
 
 
-def generate_classic_streaming_ddl(
+def generate_sql_insert_streaming_ddl(
     database: str = None,
     schema: str = None,
     table_name: str = "AMI_STREAMING_READINGS",
     enable_change_tracking: bool = True,
 ) -> str:
     """
-    Generate DDL for Classic architecture (SQL INSERT path).
+    Generate DDL for SQL INSERT architecture.
 
-    Classic architecture writes directly to tables via SQL INSERT.
+    SQL INSERT architecture writes directly to tables via Snowpark session.
     No PIPE object is needed. Only the target table is created.
     """
     database = database or DB
     schema = schema or SCHEMA_PRODUCTION
     return f"""
 -- ============================================================================
--- CLASSIC SNOWPIPE STREAMING SETUP (SQL INSERT Path)
+-- SQL INSERT STREAMING SETUP
 -- ============================================================================
 -- The Classic Snowpipe Streaming SDK is Java-only.
 -- For Python applications, SQL INSERT via Snowpark is the equivalent.
@@ -519,6 +518,63 @@ TO ROLE SYSADMIN;
 """
 
 
+# Backward-compatible alias
+generate_classic_streaming_ddl = generate_sql_insert_streaming_ddl
+
+
+def _build_copy_into_from_columns(
+    database: str,
+    schema: str,
+    table_name: str,
+    table_columns: List[Dict[str, str]],
+    cluster_clause: str = "",
+) -> str:
+    """
+    Dynamically build a COPY INTO ... FROM (SELECT ...) clause from actual table columns.
+
+    For each column, generates:
+      - Column name in the target list
+      - $1:<COL>::<TYPE> in the SELECT, with special handling for DEFAULT timestamp columns
+    """
+    # Columns whose default is CURRENT_TIMESTAMP — use CURRENT_TIMESTAMP() in SELECT
+    _TIMESTAMP_DEFAULT_NAMES = {
+        'INGESTION_TIMESTAMP', 'CREATED_AT', 'INSERTED_AT', 'LOADED_AT',
+        'INSERT_TIMESTAMP', 'LOAD_TIMESTAMP',
+    }
+
+    col_names = []
+    select_exprs = []
+
+    for col in table_columns:
+        name = col['name'].upper()
+        sf_type = col['type'].upper()
+        col_names.append(f"    {name}")
+
+        # If this looks like an auto-timestamp column, use CURRENT_TIMESTAMP()
+        if name in _TIMESTAMP_DEFAULT_NAMES and 'TIMESTAMP' in sf_type:
+            select_exprs.append("        CURRENT_TIMESTAMP()")
+        else:
+            # Map Snowflake type string to a cast type
+            cast_type = sf_type
+            # Snowflake DESC TABLE returns types like "VARCHAR(50)", "NUMBER(38,0)", etc.
+            # These are valid cast targets as-is.
+            select_exprs.append(f"        $1:{name}::{cast_type}")
+
+    col_list = ",\n".join(col_names)
+    select_list = ",\n".join(select_exprs)
+
+    return f"""
+COPY INTO {database}.{schema}.{table_name} (
+{col_list}
+)
+FROM (
+    SELECT
+{select_list}
+    FROM TABLE(DATA_SOURCE(TYPE => 'STREAMING'))
+)
+{cluster_clause}"""
+
+
 def generate_hp_streaming_ddl(
     database: str = None,
     schema: str = None,
@@ -526,12 +582,18 @@ def generate_hp_streaming_ddl(
     pipe_name: str = "AMI_STREAMING_PIPE",
     enable_transformation: bool = True,
     enable_clustering: bool = True,
+    table_columns: List[Dict[str, str]] = None,
 ) -> str:
     """
     Generate DDL for HP architecture (SDK + PIPE object).
 
     HP architecture requires a PIPE object with DATA_SOURCE(TYPE => 'STREAMING').
     The PIPE defines server-side transforms applied during ingestion.
+
+    Args:
+        table_columns: Optional list of {"name": ..., "type": ...} dicts from
+            DESC TABLE.  When provided the COPY INTO is built dynamically to
+            match the real table schema instead of using hardcoded columns.
     """
     database = database or DB
     schema = schema or SCHEMA_PRODUCTION
@@ -540,35 +602,53 @@ def generate_hp_streaming_ddl(
     if enable_clustering:
         cluster_clause = "CLUSTER_AT_INGEST_TIME = TRUE"
 
-    if enable_transformation:
+    if table_columns and enable_transformation:
+        # ── Deterministic path: generate COPY INTO from actual table columns ──
+        copy_body = _build_copy_into_from_columns(
+            database, schema, table_name, table_columns, cluster_clause,
+        )
+    elif enable_transformation:
+        # ── Fallback: 18-column schema matching generate_ami_reading() ──
         copy_body = f"""
 COPY INTO {database}.{schema}.{table_name} (
     METER_ID,
+    TRANSFORMER_ID,
+    CIRCUIT_ID,
+    SUBSTATION_ID,
     READING_TIMESTAMP,
     USAGE_KWH,
     VOLTAGE,
+    POWER_FACTOR,
     TEMPERATURE_C,
     SERVICE_AREA,
     CUSTOMER_SEGMENT,
-    TRANSFORMER_ID,
-    SUBSTATION_ID,
+    LATITUDE,
+    LONGITUDE,
     IS_OUTAGE,
     DATA_QUALITY,
-    INGESTION_TIMESTAMP
+    PRODUCTION_MATCHED,
+    EMISSION_PATTERN,
+    CREATED_AT
 )
 FROM (
     SELECT
         $1:METER_ID::VARCHAR(50),
+        $1:TRANSFORMER_ID::VARCHAR(50),
+        $1:CIRCUIT_ID::VARCHAR(50),
+        $1:SUBSTATION_ID::VARCHAR(50),
         $1:READING_TIMESTAMP::TIMESTAMP_NTZ,
         $1:USAGE_KWH::FLOAT,
         $1:VOLTAGE::FLOAT,
+        $1:POWER_FACTOR::FLOAT,
         $1:TEMPERATURE_C::FLOAT,
         $1:SERVICE_AREA::VARCHAR(100),
         $1:CUSTOMER_SEGMENT::VARCHAR(50),
-        $1:TRANSFORMER_ID::VARCHAR(50),
-        $1:SUBSTATION_ID::VARCHAR(50),
+        $1:LATITUDE::FLOAT,
+        $1:LONGITUDE::FLOAT,
         $1:IS_OUTAGE::BOOLEAN,
         COALESCE($1:DATA_QUALITY::VARCHAR(20), 'VALID'),
+        $1:PRODUCTION_MATCHED::BOOLEAN,
+        $1:EMISSION_PATTERN::VARCHAR(20),
         CURRENT_TIMESTAMP()
     FROM TABLE(DATA_SOURCE(TYPE => 'STREAMING'))
 )
@@ -605,7 +685,10 @@ AS
 SHOW PIPES LIKE '{pipe_name}' IN SCHEMA {database}.{schema};
 
 -- Grant permissions for streaming role
-GRANT SELECT, INSERT, EVOLVE SCHEMA ON TABLE {database}.{schema}.{table_name}
+GRANT SELECT, INSERT ON TABLE {database}.{schema}.{table_name}
+TO ROLE SYSADMIN;
+
+GRANT EVOLVE SCHEMA ON TABLE {database}.{schema}.{table_name}
 TO ROLE SYSADMIN;
 
 GRANT OPERATE ON PIPE {database}.{schema}.{pipe_name}
@@ -649,12 +732,12 @@ def generate_full_ddl(
 # PYTHON CLIENT CODE GENERATORS
 # ============================================================================
 
-def get_classic_python_client_code(
+def get_sql_insert_python_client_code(
     database: str = None,
     schema: str = None,
     table_name: str = "AMI_STREAMING_READINGS",
 ) -> str:
-    """Generate Python client code for Classic architecture (SQL INSERT via Snowpark)"""
+    """Generate Python client code for SQL INSERT architecture (via Snowpark)"""
     database = database or DB
     schema = schema or SCHEMA_PRODUCTION
     return f'''#!/usr/bin/env python3
@@ -814,17 +897,21 @@ def create_streaming_client(
 
     Args:
         config: Streaming configuration (created with defaults if None)
-        architecture: 'classic' for SQL INSERT, 'hp' for HP SDK
-        session: Snowpark session (required for classic, ignored for HP)
+        architecture: 'sql_insert' for SQL INSERT, 'hp' for HP SDK (overridden by config.architecture if set)
+        session: Snowpark session (required for sql_insert, ignored for HP)
 
     Returns:
-        ClassicStreamingClient or HPStreamingClient
+        SqlInsertClient or HPStreamingClient
     """
     if config is None:
         config = SnowpipeStreamingConfig(architecture=architecture)
+    else:
+        # Prefer config.architecture when provided
+        if config.architecture:
+            architecture = config.architecture
 
-    if architecture == "classic":
-        client = ClassicStreamingClient(config, session=session)
+    if architecture == "sql_insert" or architecture == "classic":
+        client = SqlInsertClient(config, session=session)
     else:
         client = HPStreamingClient(config)
 

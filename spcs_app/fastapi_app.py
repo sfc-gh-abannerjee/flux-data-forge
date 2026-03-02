@@ -10,16 +10,32 @@ import os
 import logging
 import html
 from datetime import datetime, date, timedelta, timezone
-from typing import Optional
+from typing import Dict, Optional
 from contextlib import asynccontextmanager
 import json
 import io
+import math
 
 # Import centralized configuration
 from config import DB, SCHEMA_PRODUCTION, SCHEMA_APPLICATIONS, get_table_path
 
 # Import SQL sanitization utilities
 from utils.sanitize import validate_identifier, sanitize_sql_value
+
+# Import extracted data generation engine (Step 3A: module extraction)
+from data_generators import (
+    EMISSION_PATTERNS,
+    EVENT_FREQUENCIES,
+    GridTopologyState,
+    DATA_FORMATS,
+    UTILITY_PROFILES,
+    SNOWPIPE_SDK_LIMITS,
+    generate_ami_reading,
+    generate_itron_grid_planning_row,
+    generate_symphony_iris_row,
+    generate_carto_spatial_row,
+    generate_siemens_edge_row,
+)
 
 from fastapi import FastAPI, Request, Form, HTTPException, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -117,43 +133,11 @@ PRODUCTION_DATA_SOURCES = {
     },
 }
 
-# Realistic emission patterns - based on real AMI infrastructure behavior
-EMISSION_PATTERNS = {
-    'UNIFORM': {
-        'name': 'Uniform (All meters report)',
-        'description': 'All meters emit at each interval - useful for testing max throughput',
-        'meter_report_pct': 100,  # % of meters that report each interval
-        'stagger_seconds': 0,     # Time spread within interval
-    },
-    'STAGGERED_REALISTIC': {
-        'name': 'Staggered (Realistic)',
-        'description': 'Meters report across the 15-min window - mimics real AMI behavior',
-        'meter_report_pct': 100,
-        'stagger_seconds': 900,  # Spread across full 15-min interval
-    },
-    'PARTIAL_REPORTING': {
-        'name': 'Partial (98% reporting)',
-        'description': '2% communication failures - realistic data quality',
-        'meter_report_pct': 98,
-        'stagger_seconds': 600,
-    },
-    'DEGRADED_NETWORK': {
-        'name': 'Degraded (85% reporting)',
-        'description': 'Simulates network issues or storm conditions',
-        'meter_report_pct': 85,
-        'stagger_seconds': 900,
-    },
-}
+# EMISSION_PATTERNS, EVENT_FREQUENCIES — imported from data_generators
 
-# Event frequency ratios (per 1000 meters per interval)
-EVENT_FREQUENCIES = {
-    'readings': 1000,          # Base: 1000 per 1000 meters (100%)
-    'voltage_anomalies': 20,   # 2% voltage events
-    'power_quality': 10,       # 1% power quality events
-    'outages': 5,              # 0.5% outage signals
-    'tamper_alerts': 1,        # 0.1% tamper alerts
-    'reverse_flow': 8,         # 0.8% solar/reverse flow
-}
+
+# GridTopologyState — imported from data_generators
+
 
 # Unified Data Flow options - combines mechanism + destination into logical pipelines
 # Simplified to 4 clear options that make sense to users
@@ -226,72 +210,56 @@ TARGET_DESTINATIONS = {
     'stage': {'name': 'Stage (Landing Zone)', 'color': '#0ea5e9'},
 }
 
-# Data format options for streaming
-DATA_FORMATS = {
-    'standard': {
-        'name': 'Standard AMI',
-        'description': 'Structured columns optimized for analytics',
-        'columns': ['METER_ID', 'TRANSFORMER_ID', 'CIRCUIT_ID', 'READING_TIMESTAMP', 'USAGE_KWH', 'VOLTAGE', 'CUSTOMER_SEGMENT'],
+# Streaming Architecture Advisor — maps source systems to recommended ingestion paths
+STREAMING_ADVISOR = {
+    'AMI Head-End': {
+        'icon': 'electric_meter',
+        'sources': ['Itron, Landis+Gyr, Honeywell', 'Interval reads (15-min)', '100K-1M+ meters'],
+        'recommended': 'streaming_hp',
+        'alt': 'streaming_insert',
+        'rationale': 'High-volume, steady-state meter reads benefit from HP SDK offset tracking and throughput-based billing. SQL INSERT works for smaller fleets (<10K meters).',
     },
-    'raw_ami': {
-        'name': 'Raw AMI (with VARIANT)',
-        'description': 'Includes RAW_PAYLOAD VARIANT column with full JSON for semi-structured analytics',
-        'columns': ['METER_ID', 'READING_TIMESTAMP', 'USAGE_KWH', 'RAW_PAYLOAD'],
+    'SCADA / OT': {
+        'icon': 'sensors',
+        'sources': ['OSIsoft PI, Aveva, ABB', 'Sub-second telemetry', 'Voltage, frequency, power factor'],
+        'recommended': 'streaming_hp',
+        'alt': 'dual_write',
+        'rationale': 'SCADA feeds require sustained high throughput with low latency. HP SDK handles burst traffic well. Dual Write adds Postgres for operational dashboards needing <20ms reads.',
     },
-    'minimal': {
-        'name': 'Minimal',
-        'description': 'Essential columns only - fastest ingestion',
-        'columns': ['METER_ID', 'READING_TIMESTAMP', 'USAGE_KWH'],
+    'Kafka / Event Streaming': {
+        'icon': 'swap_horiz',
+        'sources': ['Confluent, MSK, Redpanda', 'Event-driven architecture', 'Multi-consumer topics'],
+        'recommended': 'streaming_hp',
+        'alt': 'streaming_insert',
+        'rationale': 'Openflow natively supports Kafka connectors (zero-code). For custom transforms or consumer logic, HP SDK gives full control. SQL INSERT for low-volume topics.',
+        'openflow_note': True,
     },
-}
-
-UTILITY_PROFILES = {
-    'TEXAS_GULF_COAST': {
-        'name': 'Texas Gulf Coast (ERCOT)',
-        'segment_dist': {'RESIDENTIAL': 70, 'COMMERCIAL': 20, 'INDUSTRIAL': 10},
-        'description': 'Hot humid subtropical - high summer AC load',
-        'center_lat': 29.7604, 'center_lon': -95.3698,
+    'Cloud Events': {
+        'icon': 'cloud_queue',
+        'sources': ['Azure EventHub, GCP Pub/Sub', 'IoT Hub, Event Grid', 'Serverless triggers'],
+        'recommended': 'streaming_hp',
+        'alt': 'streaming_insert',
+        'rationale': 'Openflow supports EventHub (ConsumeAzureEventHub) and PubSub (ConsumeGCPubSub) natively. HP SDK for custom parsing or when Openflow is unavailable.',
+        'openflow_note': True,
     },
-    'CALIFORNIA_COASTAL': {
-        'name': 'California Coastal (CAISO)',
-        'segment_dist': {'RESIDENTIAL': 65, 'COMMERCIAL': 28, 'INDUSTRIAL': 7},
-        'description': 'Mediterranean climate - mild temps, evening peaks',
-        'center_lat': 34.0522, 'center_lon': -118.2437,
+    'Batch / File Drops': {
+        'icon': 'folder_open',
+        'sources': ['S3, Azure Blob, GCS', 'CSV, Parquet, JSON', 'Scheduled ETL outputs'],
+        'recommended': 'stage_landing',
+        'alt': 'snowflake_task',
+        'rationale': 'Stage Landing with auto-ingest Snowpipe is ideal for file-based data. Snowflake Task for periodic SQL-based generation or transformation.',
     },
-    'NORTHEAST_CORRIDOR': {
-        'name': 'Northeast Corridor (NYISO)',
-        'segment_dist': {'RESIDENTIAL': 55, 'COMMERCIAL': 38, 'INDUSTRIAL': 7},
-        'description': 'Humid continental - cold winters, hot summers',
-        'center_lat': 40.7128, 'center_lon': -74.0060,
-    },
-    'MIDWEST_GREAT_LAKES': {
-        'name': 'Midwest/Great Lakes (MISO)',
-        'segment_dist': {'RESIDENTIAL': 60, 'COMMERCIAL': 30, 'INDUSTRIAL': 10},
-        'description': 'Continental climate - extreme cold winters',
-        'center_lat': 41.8781, 'center_lon': -87.6298,
-    },
-    'SOUTHEAST_SUNBELT': {
-        'name': 'Southeast Sunbelt (SERC)',
-        'segment_dist': {'RESIDENTIAL': 68, 'COMMERCIAL': 24, 'INDUSTRIAL': 8},
-        'description': 'Humid subtropical - high AC load, mild winters',
-        'center_lat': 33.7490, 'center_lon': -84.3880,
-    },
-    'PACIFIC_NORTHWEST': {
-        'name': 'Pacific Northwest (BPA)',
-        'segment_dist': {'RESIDENTIAL': 62, 'COMMERCIAL': 28, 'INDUSTRIAL': 10},
-        'description': 'Marine climate - mild temps, high winter heating',
-        'center_lat': 47.6062, 'center_lon': -122.3321,
+    'Database CDC': {
+        'icon': 'storage',
+        'sources': ['MySQL, PostgreSQL, Oracle', 'Change Data Capture', 'Debezium, AWS DMS'],
+        'recommended': 'streaming_hp',
+        'alt': 'stage_landing',
+        'rationale': 'Openflow natively supports MySQL, PostgreSQL, SQL Server, and Oracle CDC. HP SDK for custom CDC pipelines. Stage Landing for DMS file outputs.',
+        'openflow_note': True,
     },
 }
 
-SNOWPIPE_SDK_LIMITS = {
-    'max_throughput_gb_s': 10,
-    'max_batch_size_mb': 16,
-    'optimal_batch_size_mb': {'min': 10, 'max': 16},
-    'max_client_lag_seconds': {'min': 1, 'max': 600, 'default': 1, 'iceberg_default': 30},
-    'row_size_estimate_bytes': 500,
-    'channel_inactive_days': 30,
-}
+# DATA_FORMATS, UTILITY_PROFILES, SNOWPIPE_SDK_LIMITS — imported from data_generators
 
 FLUX_LOGO_BASE64 = "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"
 
@@ -385,58 +353,9 @@ def get_valid_session() -> Optional[Session]:
             raise
 
 
-def generate_ami_reading(meter_info: dict, service_area: str, emission_pattern: str) -> dict:
-    """Generate a single realistic AMI reading"""
-    hour = datetime.now().hour
-    
-    # Time-of-day usage multiplier
-    if 14 <= hour <= 19:  # Peak hours
-        base_usage = random.uniform(1.5, 3.5)
-    elif 6 <= hour <= 9:  # Morning peak
-        base_usage = random.uniform(1.0, 2.5)
-    else:  # Off-peak
-        base_usage = random.uniform(0.3, 1.5)
-    
-    # Segment multiplier
-    segment = meter_info.get('customer_segment', 'RESIDENTIAL')
-    if segment == 'INDUSTRIAL':
-        usage_multiplier = 15
-    elif segment == 'COMMERCIAL':
-        usage_multiplier = 5
-    else:
-        usage_multiplier = 1
-    
-    # Data quality
-    quality_roll = random.randint(1, 100)
-    if quality_roll <= 1:
-        data_quality = 'OUTAGE'
-        is_outage = True
-    elif quality_roll >= 98:
-        data_quality = 'ANOMALY'
-        is_outage = False
-    else:
-        data_quality = 'VALID'
-        is_outage = False
-    
-    return {
-        'METER_ID': meter_info.get('meter_id', f'MTR-{uuid.uuid4().hex[:8].upper()}'),
-        'TRANSFORMER_ID': meter_info.get('transformer_id'),
-        'CIRCUIT_ID': meter_info.get('circuit_id'),
-        'SUBSTATION_ID': meter_info.get('substation_id'),
-        'READING_TIMESTAMP': datetime.now(),
-        'USAGE_KWH': round(base_usage * usage_multiplier, 4),
-        'VOLTAGE': round(random.uniform(118, 122), 2),
-        'POWER_FACTOR': round(random.uniform(0.92, 0.99), 3),
-        'TEMPERATURE_C': round(random.uniform(15, 35), 1),
-        'SERVICE_AREA': service_area,
-        'CUSTOMER_SEGMENT': segment,
-        'LATITUDE': meter_info.get('latitude'),
-        'LONGITUDE': meter_info.get('longitude'),
-        'IS_OUTAGE': is_outage,
-        'DATA_QUALITY': data_quality,
-        'PRODUCTION_MATCHED': meter_info.get('production_matched', False),
-        'EMISSION_PATTERN': emission_pattern,
-    }
+# All generator functions and their private constants (_LOAD_SHAPES, _ASSET_TYPES,
+# _FAILURE_MODES, _SCADA_DEVICES, _SCADA_TAGS, _PROTOCOLS) are imported from
+# data_generators module (Step 3A extraction).
 
 
 def snowpipe_streaming_worker(job_id: str, config: dict):
@@ -459,6 +378,7 @@ def snowpipe_streaming_worker(job_id: str, config: dict):
     service_area = config.get('service_area', 'TEXAS_GULF_COAST')
     emission_pattern = config.get('emission_pattern', 'STAGGERED_REALISTIC')
     production_source = config.get('production_source', 'SYNTHETIC')
+    data_format = config.get('data_format', 'standard')
     target_table = config.get('target_table', f'{DB}.{SCHEMA_PRODUCTION}.AMI_STREAMING_DATA')
     
     # Initialize stats
@@ -466,9 +386,13 @@ def snowpipe_streaming_worker(job_id: str, config: dict):
         'total_rows': 0,
         'batches_sent': 0,
         'errors': 0,
+        'consecutive_errors': 0,
+        'last_error': '',
         'start_time': datetime.now(),
         'last_batch_time': None,
         'mechanism': mechanism,
+        'batch_latencies': [],
+        'peak_rps': 0,
     }
     
     with streaming_lock:
@@ -479,35 +403,60 @@ def snowpipe_streaming_worker(job_id: str, config: dict):
     # Initialize HP SDK client if using HP architecture
     hp_client = None
     if mechanism == 'snowpipe_hp':
-        try:
-            from snowpipe_streaming_impl import HPStreamingClient, SnowpipeStreamingConfig
-            hp_config = SnowpipeStreamingConfig(
-                architecture='hp',
-                pipe_name=config.get('pipe_name', 'AMI_STREAMING_PIPE'),
-                client_name=f'flux_hp_{job_id}',
-                channel_name=f'flux_channel_{job_id}',
-            )
-            hp_client = HPStreamingClient(hp_config)
-            if not hp_client.initialize():
-                logger.error(f"Job {job_id}: Failed to initialize HP SDK client, falling back to SQL INSERT")
-                hp_client = None
-                mechanism = 'snowpipe_classic'
-                with streaming_lock:
-                    if job_id in active_streaming_jobs:
-                        active_streaming_jobs[job_id]['stats']['mechanism'] = 'snowpipe_classic (fallback)'
-            else:
-                logger.info(f"Job {job_id}: HP SDK client initialized successfully")
-        except ImportError:
-            logger.error(f"Job {job_id}: snowpipe-streaming not installed, falling back to SQL INSERT")
+        from snowpipe_streaming_impl import is_running_in_spcs
+        has_hp_creds = is_running_in_spcs() or os.environ.get('SNOWFLAKE_PRIVATE_KEY') or os.environ.get('SNOWFLAKE_PRIVATE_KEY_PATH') or _connection_params.get('auth_mode') == 'keypair'
+        if not has_hp_creds:
+            logger.info(f"Job {job_id}: Not in SPCS and no HP credentials configured — using SQL INSERT")
             hp_client = None
             mechanism = 'snowpipe_classic'
             with streaming_lock:
                 if job_id in active_streaming_jobs:
-                    active_streaming_jobs[job_id]['stats']['mechanism'] = 'snowpipe_classic (fallback)'
-        except Exception as e:
-            logger.error(f"Job {job_id}: HP init error: {e}, falling back to SQL INSERT")
-            hp_client = None
-            mechanism = 'snowpipe_classic'
+                    active_streaming_jobs[job_id]['config']['mechanism'] = 'sql_insert (auto-local)'
+                    active_streaming_jobs[job_id]['stats']['mechanism'] = 'sql_insert (auto-local)'
+        else:
+            try:
+                from snowpipe_streaming_impl import HPStreamingClient, SnowpipeStreamingConfig
+                # Extract credentials from existing Snowpark session if available
+                session = get_valid_session()
+                hp_kwargs = {
+                    'architecture': 'hp',
+                    'pipe_name': config.get('pipe_name', 'AMI_STREAMING_PIPE'),
+                    'client_name': f'flux_hp_{job_id}',
+                    'channel_name': f'flux_channel_{job_id}',
+                }
+                if session:
+                    try:
+                        hp_kwargs['account'] = session.get_current_account()
+                        hp_kwargs['user'] = session.get_current_user()
+                        hp_kwargs['role'] = session.get_current_role()
+                        hp_kwargs['database'] = session.get_current_database()
+                        hp_kwargs['schema'] = session.get_current_schema()
+                    except Exception:
+                        pass
+                hp_config = SnowpipeStreamingConfig(**hp_kwargs)
+                hp_client = HPStreamingClient(hp_config)
+                if not hp_client.initialize():
+                    logger.error(f"Job {job_id}: Failed to initialize HP SDK client, falling back to SQL INSERT")
+                    hp_client = None
+                    mechanism = 'snowpipe_classic'
+                    with streaming_lock:
+                        if job_id in active_streaming_jobs:
+                            active_streaming_jobs[job_id]['config']['mechanism'] = 'sql_insert (fallback)'
+                            active_streaming_jobs[job_id]['stats']['mechanism'] = 'sql_insert (fallback)'
+                else:
+                    logger.info(f"Job {job_id}: HP SDK client initialized successfully")
+            except ImportError:
+                logger.error(f"Job {job_id}: snowpipe-streaming not installed, falling back to SQL INSERT")
+                hp_client = None
+                mechanism = 'snowpipe_classic'
+                with streaming_lock:
+                    if job_id in active_streaming_jobs:
+                        active_streaming_jobs[job_id]['config']['mechanism'] = 'sql_insert (fallback)'
+                        active_streaming_jobs[job_id]['stats']['mechanism'] = 'sql_insert (fallback)'
+            except Exception as e:
+                logger.error(f"Job {job_id}: HP init error: {e}, falling back to SQL INSERT")
+                hp_client = None
+                mechanism = 'snowpipe_classic'
     
     # Load meter fleet from production or generate synthetic
     meter_fleet = []
@@ -566,6 +515,18 @@ def snowpipe_streaming_worker(job_id: str, config: dict):
     batch_interval = batch_size / max(rows_per_sec, 1)  # seconds between batches
     batch_counter = 0
     
+    # --- Grid topology state: correlated outages & voltage cascading ---
+    grid_state = GridTopologyState()
+    for m in meter_fleet:
+        grid_state.register_meter(m)
+    topo_summary = grid_state.summary()
+    logger.info(
+        f"Job {job_id}: Grid topology initialized — "
+        f"{topo_summary['substations_total']} substations, "
+        f"{topo_summary['circuits_total']} circuits, "
+        f"{topo_summary['transformers_total']} transformers"
+    )
+    
     # Main streaming loop
     while True:
         # Check if job should stop
@@ -579,11 +540,29 @@ def snowpipe_streaming_worker(job_id: str, config: dict):
                 break
         
         try:
-            # Generate batch of readings
+            # Advance grid topology (probabilistic outage/recovery transitions)
+            grid_state.tick()
+            
+            # Generate batch of readings (topology-aware)
             batch = []
             for _ in range(min(batch_size, len(meter_fleet))):
                 meter = random.choice(meter_fleet)
-                reading = generate_ami_reading(meter, service_area, emission_pattern)
+                if data_format == 'itron_grid_planning':
+                    reading = generate_itron_grid_planning_row(
+                        meter, service_area, grid_state=grid_state)
+                elif data_format == 'symphony_iris':
+                    reading = generate_symphony_iris_row(
+                        meter, service_area, grid_state=grid_state)
+                elif data_format == 'carto_spatial':
+                    reading = generate_carto_spatial_row(
+                        meter, service_area, grid_state=grid_state)
+                elif data_format == 'siemens_edge':
+                    reading = generate_siemens_edge_row(
+                        meter, service_area, grid_state=grid_state)
+                else:
+                    reading = generate_ami_reading(
+                        meter, service_area, emission_pattern,
+                        grid_state=grid_state)
                 batch.append(reading)
             
             if not batch:
@@ -595,50 +574,59 @@ def snowpipe_streaming_worker(job_id: str, config: dict):
             if mechanism == 'snowpipe_hp' and hp_client:
                 # HP Architecture: Use SDK append_rows
                 offset_token = f"{job_id}_batch_{batch_counter}"
+                batch_start = time.time()
                 hp_client.write_rows(batch, offset_token=offset_token)
+                batch_latency_ms = (time.time() - batch_start) * 1000
                 
                 # Update stats
                 with streaming_lock:
                     if job_id in active_streaming_jobs:
-                        active_streaming_jobs[job_id]['stats']['total_rows'] += len(batch)
-                        active_streaming_jobs[job_id]['stats']['batches_sent'] += 1
-                        active_streaming_jobs[job_id]['stats']['last_batch_time'] = datetime.now()
+                        s = active_streaming_jobs[job_id]['stats']
+                        s['total_rows'] += len(batch)
+                        s['batches_sent'] += 1
+                        s['last_batch_time'] = datetime.now()
+                        lats = s.get('batch_latencies', [])
+                        lats.append(batch_latency_ms)
+                        if len(lats) > 1000:
+                            lats = lats[-1000:]
+                        s['batch_latencies'] = lats
+                        elapsed = (datetime.now() - s['start_time']).total_seconds() or 1
+                        rps = s['total_rows'] / elapsed
+                        if rps > s.get('peak_rps', 0):
+                            s['peak_rps'] = rps
+                        s['grid_topology'] = grid_state.summary()
+                        s['consecutive_errors'] = 0  # Reset on success
                 
                 logger.debug(f"Job {job_id}: HP SDK wrote {len(batch)} rows (offset: {offset_token})")
             else:
-                # Classic Architecture: SQL INSERT via Snowpark session
+                # SQL INSERT Architecture: safe write via Snowpark DataFrame
                 session = get_valid_session()
                 if session:
                     columns = list(batch[0].keys())
-                    col_str = ', '.join(columns)
-                    
-                    values_list = []
-                    for row in batch:
-                        vals = []
-                        for col in columns:
-                            v = row[col]
-                            if v is None:
-                                vals.append('NULL')
-                            elif isinstance(v, bool):
-                                vals.append('TRUE' if v else 'FALSE')
-                            elif isinstance(v, (int, float)):
-                                vals.append(str(v))
-                            elif isinstance(v, datetime):
-                                vals.append(f"'{v.strftime('%Y-%m-%d %H:%M:%S')}'")
-                            else:
-                                safe_val = str(v).replace("'", "''")
-                                vals.append(f"'{safe_val}'")
-                        values_list.append(f"({', '.join(vals)})")
-                    
-                    insert_sql = f"INSERT INTO {target_table} ({col_str}) VALUES {', '.join(values_list)}"
-                    session.sql(insert_sql).collect()
+                    data = [[row.get(c) for c in columns] for row in batch]
+                    df = session.create_dataframe(data, schema=columns)
+                    batch_start = time.time()
+                    df.write.mode("append").save_as_table(target_table)
+                    batch_latency_ms = (time.time() - batch_start) * 1000
                     
                     # Update stats
                     with streaming_lock:
                         if job_id in active_streaming_jobs:
-                            active_streaming_jobs[job_id]['stats']['total_rows'] += len(batch)
-                            active_streaming_jobs[job_id]['stats']['batches_sent'] += 1
-                            active_streaming_jobs[job_id]['stats']['last_batch_time'] = datetime.now()
+                            s = active_streaming_jobs[job_id]['stats']
+                            s['total_rows'] += len(batch)
+                            s['batches_sent'] += 1
+                            s['last_batch_time'] = datetime.now()
+                            lats = s.get('batch_latencies', [])
+                            lats.append(batch_latency_ms)
+                            if len(lats) > 1000:
+                                lats = lats[-1000:]
+                            s['batch_latencies'] = lats
+                            elapsed = (datetime.now() - s['start_time']).total_seconds() or 1
+                            rps = s['total_rows'] / elapsed
+                            if rps > s.get('peak_rps', 0):
+                                s['peak_rps'] = rps
+                            s['grid_topology'] = grid_state.summary()
+                            s['consecutive_errors'] = 0  # Reset on success
                     
                     logger.debug(f"Job {job_id}: Classic SQL INSERT {len(batch)} rows")
             
@@ -646,11 +634,25 @@ def snowpipe_streaming_worker(job_id: str, config: dict):
             time.sleep(max(batch_interval, 0.1))
             
         except Exception as e:
-            logger.error(f"Streaming error for job {job_id}: {e}")
+            error_msg = str(e)
+            logger.error(f"Streaming error for job {job_id}: {error_msg}")
+            consecutive_errors = 1
             with streaming_lock:
                 if job_id in active_streaming_jobs:
-                    active_streaming_jobs[job_id]['stats']['errors'] += 1
-            time.sleep(1)  # Back off on error
+                    s = active_streaming_jobs[job_id]['stats']
+                    s['errors'] += 1
+                    s['last_error'] = error_msg[:200]
+                    consecutive_errors = s.get('consecutive_errors', 0) + 1
+                    s['consecutive_errors'] = consecutive_errors
+                    # Stop after 10 consecutive errors — something is fundamentally wrong
+                    if consecutive_errors >= 10:
+                        active_streaming_jobs[job_id]['status'] = 'ERROR'
+                        logger.error(
+                            f"Job {job_id}: Stopped after {consecutive_errors} consecutive errors. "
+                            f"Last error: {error_msg[:200]}"
+                        )
+                        break
+            time.sleep(min(consecutive_errors, 5))  # Back off progressively up to 5s
     
     # Cleanup HP client if used
     if hp_client:
@@ -661,6 +663,643 @@ def snowpipe_streaming_worker(job_id: str, config: dict):
             logger.error(f"Job {job_id}: Error closing HP client: {e}")
     
     logger.info(f"Snowpipe Streaming worker for job {job_id} finished (mechanism={mechanism})")
+
+
+# ============================================================================
+# EVENTHUB → SNOWFLAKE STREAMING WORKER (Main App)
+# ============================================================================
+
+def eventhub_streaming_worker(job_id: str, config: dict):
+    """
+    Background worker: consume from Azure EventHub → stream to Snowflake.
+    Uses the main app's active_streaming_jobs state pattern.
+    Supports both HP SDK (pipe-based) and Classic SQL INSERT.
+    """
+    global active_streaming_jobs
+
+    mechanism = config.get('mechanism', 'snowpipe_classic')
+    eh_conn_str = config.get('eh_conn_str', '')
+    eh_name = config.get('eh_name', '')
+    eh_consumer_group = config.get('eh_consumer_group', '$Default')
+    target_table = config.get('target_table', '')
+    batch_size = config.get('batch_size', 100)
+    pipe_name = config.get('pipe_name', 'AMI_STREAMING_PIPE')
+
+    logger.info(f"[{job_id}] Starting EventHub worker: hub={eh_name}, mechanism={mechanism}")
+
+    with streaming_lock:
+        if job_id in active_streaming_jobs:
+            active_streaming_jobs[job_id]['status'] = 'RUNNING'
+            active_streaming_jobs[job_id]['stats'] = {
+                'total_rows': 0, 'batches_sent': 0, 'errors': 0,
+                'start_time': datetime.now(), 'last_batch_time': None,
+                'mechanism': mechanism, 'source': 'eventhub',
+                'batch_latencies': [], 'peak_rps': 0,
+            }
+
+    consumer = None
+    hp_client = None
+
+    try:
+        from azure.eventhub import EventHubConsumerClient
+
+        # Initialize HP SDK client if using HP mechanism
+        if mechanism == 'snowpipe_hp':
+            from snowpipe_streaming_impl import is_running_in_spcs
+            has_hp_creds = is_running_in_spcs() or os.environ.get('SNOWFLAKE_PRIVATE_KEY') or os.environ.get('SNOWFLAKE_PRIVATE_KEY_PATH') or _connection_params.get('auth_mode') == 'keypair'
+            if not has_hp_creds:
+                logger.info(f"[{job_id}] Not in SPCS — EventHub worker using SQL INSERT")
+                hp_client = None
+                mechanism = 'snowpipe_classic'
+            else:
+                try:
+                    from snowpipe_streaming_impl import HPStreamingClient, SnowpipeStreamingConfig
+                    hp_config = SnowpipeStreamingConfig(
+                        architecture='hp',
+                        pipe_name=pipe_name,
+                        client_name=f'flux_eh_hp_{job_id}',
+                        channel_name=f'flux_eh_ch_{job_id}',
+                    )
+                    hp_client = HPStreamingClient(hp_config)
+                    if not hp_client.initialize():
+                        logger.error(f"[{job_id}] HP SDK init failed, falling back to SQL INSERT")
+                        hp_client = None
+                        mechanism = 'snowpipe_classic'
+                except Exception as e:
+                    logger.error(f"[{job_id}] HP SDK import/init error: {e}, falling back to SQL INSERT")
+                    hp_client = None
+                    mechanism = 'snowpipe_classic'
+
+        batch_buffer = []
+        batch_counter = 0
+
+        def _flush(rows):
+            nonlocal batch_counter
+            if not rows:
+                return
+            batch_counter += 1
+            try:
+                batch_start = time.time()
+                if mechanism == 'snowpipe_hp' and hp_client:
+                    offset_token = f"{job_id}_eh_batch_{batch_counter}"
+                    hp_client.write_rows(rows, offset_token=offset_token)
+                else:
+                    session = get_valid_session()
+                    if session:
+                        columns = list(rows[0].keys())
+                        data = [[row.get(c) for c in columns] for row in rows]
+                        df = session.create_dataframe(data, schema=columns)
+                        df.write.mode("append").save_as_table(target_table)
+
+                batch_latency_ms = (time.time() - batch_start) * 1000
+
+                with streaming_lock:
+                    if job_id in active_streaming_jobs:
+                        s = active_streaming_jobs[job_id]['stats']
+                        s['total_rows'] += len(rows)
+                        s['batches_sent'] += 1
+                        s['last_batch_time'] = datetime.now()
+                        lats = s.get('batch_latencies', [])
+                        lats.append(batch_latency_ms)
+                        if len(lats) > 1000:
+                            lats = lats[-1000:]
+                        s['batch_latencies'] = lats
+                        elapsed = (datetime.now() - s['start_time']).total_seconds() or 1
+                        rps = s['total_rows'] / elapsed
+                        if rps > s.get('peak_rps', 0):
+                            s['peak_rps'] = rps
+            except Exception as e:
+                logger.error(f"[{job_id}] EventHub flush error: {e}")
+                with streaming_lock:
+                    if job_id in active_streaming_jobs:
+                        active_streaming_jobs[job_id]['stats']['errors'] += 1
+
+        def on_event(partition_context, event):
+            nonlocal batch_buffer
+            # Check stop signal
+            with streaming_lock:
+                if job_id not in active_streaming_jobs:
+                    raise StopIteration("Job removed")
+                if active_streaming_jobs[job_id]['status'] == 'STOPPING':
+                    raise StopIteration("Stop requested")
+
+            if event is None:
+                return
+
+            try:
+                body = event.body_as_json()
+            except Exception:
+                body = {"raw_data": event.body_as_str()}
+
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            row = {
+                "METER_ID": str(body.get("meter_id", body.get("device_id", body.get("id", "EH-UNKNOWN")))),
+                "READING_TIMESTAMP": str(body.get("reading_ts", body.get("timestamp", ts))),
+                "USAGE_KWH": float(body.get("reading_value", body.get("value", body.get("usage_kwh", 0)))),
+                "VOLTAGE": float(body.get("voltage", 120.0)),
+                "TEMPERATURE_C": float(body.get("temperature_c", body.get("temperature", 25.0))),
+                "SERVICE_AREA": str(body.get("service_area", "UNKNOWN")),
+                "CUSTOMER_SEGMENT": str(body.get("customer_segment", "RESIDENTIAL")),
+                "TRANSFORMER_ID": str(body.get("transformer_id", "")),
+                "SUBSTATION_ID": str(body.get("substation_id", "")),
+                "IS_OUTAGE": bool(body.get("is_outage", False)),
+                "DATA_QUALITY": str(body.get("quality", body.get("data_quality", "VALID"))),
+                "INGESTION_TIMESTAMP": ts,
+            }
+            batch_buffer.append(row)
+            if len(batch_buffer) >= batch_size:
+                _flush(batch_buffer[:])
+                batch_buffer.clear()
+
+        consumer = EventHubConsumerClient.from_connection_string(
+            conn_str=eh_conn_str,
+            consumer_group=eh_consumer_group,
+            eventhub_name=eh_name,
+        )
+        logger.info(f"[{job_id}] Connected to EventHub: {eh_name}")
+
+        try:
+            consumer.receive(on_event=on_event, starting_position="-1")
+        except StopIteration:
+            logger.info(f"[{job_id}] EventHub stop requested, flushing remaining")
+
+        if batch_buffer:
+            _flush(batch_buffer[:])
+            batch_buffer.clear()
+
+    except ImportError:
+        logger.error(f"[{job_id}] azure-eventhub not installed")
+        with streaming_lock:
+            if job_id in active_streaming_jobs:
+                active_streaming_jobs[job_id]['stats']['errors'] += 1
+    except Exception as e:
+        logger.exception(f"[{job_id}] EventHub worker error: {e}")
+        with streaming_lock:
+            if job_id in active_streaming_jobs:
+                active_streaming_jobs[job_id]['stats']['errors'] += 1
+    finally:
+        if consumer:
+            try:
+                consumer.close()
+            except Exception:
+                pass
+        if hp_client:
+            try:
+                hp_client.close()
+            except Exception:
+                pass
+        with streaming_lock:
+            if job_id in active_streaming_jobs:
+                active_streaming_jobs[job_id]['status'] = 'STOPPED'
+        logger.info(f"[{job_id}] EventHub worker finished")
+
+
+# ============================================================================
+# PUBSUB → SNOWFLAKE STREAMING WORKER (Main App)
+# ============================================================================
+
+def pubsub_streaming_worker(job_id: str, config: dict):
+    """
+    Background worker: consume from Google PubSub → stream to Snowflake.
+    Uses the main app's active_streaming_jobs state pattern.
+    """
+    global active_streaming_jobs
+
+    mechanism = config.get('mechanism', 'snowpipe_classic')
+    ps_project = config.get('ps_project', '')
+    ps_subscription = config.get('ps_subscription', '')
+    target_table = config.get('target_table', '')
+    batch_size = config.get('batch_size', 100)
+    pipe_name = config.get('pipe_name', 'AMI_STREAMING_PIPE')
+
+    logger.info(f"[{job_id}] Starting PubSub worker: project={ps_project}, sub={ps_subscription}")
+
+    with streaming_lock:
+        if job_id in active_streaming_jobs:
+            active_streaming_jobs[job_id]['status'] = 'RUNNING'
+            active_streaming_jobs[job_id]['stats'] = {
+                'total_rows': 0, 'batches_sent': 0, 'errors': 0,
+                'start_time': datetime.now(), 'last_batch_time': None,
+                'mechanism': mechanism, 'source': 'pubsub',
+                'batch_latencies': [], 'peak_rps': 0,
+            }
+
+    subscriber = None
+    streaming_pull_future = None
+    hp_client = None
+
+    try:
+        from google.cloud import pubsub_v1
+
+        # Initialize HP SDK client if using HP mechanism
+        if mechanism == 'snowpipe_hp':
+            from snowpipe_streaming_impl import is_running_in_spcs
+            has_hp_creds = is_running_in_spcs() or os.environ.get('SNOWFLAKE_PRIVATE_KEY') or os.environ.get('SNOWFLAKE_PRIVATE_KEY_PATH') or _connection_params.get('auth_mode') == 'keypair'
+            if not has_hp_creds:
+                logger.info(f"[{job_id}] Not in SPCS — PubSub worker using SQL INSERT")
+                hp_client = None
+                mechanism = 'snowpipe_classic'
+            else:
+                try:
+                    from snowpipe_streaming_impl import HPStreamingClient, SnowpipeStreamingConfig
+                    hp_config = SnowpipeStreamingConfig(
+                        architecture='hp',
+                        pipe_name=pipe_name,
+                        client_name=f'flux_ps_hp_{job_id}',
+                        channel_name=f'flux_ps_ch_{job_id}',
+                    )
+                    hp_client = HPStreamingClient(hp_config)
+                    if not hp_client.initialize():
+                        logger.error(f"[{job_id}] HP SDK init failed, falling back to SQL INSERT")
+                        hp_client = None
+                        mechanism = 'snowpipe_classic'
+                except Exception as e:
+                    logger.error(f"[{job_id}] HP SDK import/init error: {e}, falling back to SQL INSERT")
+                    hp_client = None
+                    mechanism = 'snowpipe_classic'
+
+        batch_buffer = []
+        buffer_lock = threading.Lock()
+        batch_counter = 0
+
+        def _flush(rows):
+            nonlocal batch_counter
+            if not rows:
+                return
+            batch_counter += 1
+            try:
+                batch_start = time.time()
+                if mechanism == 'snowpipe_hp' and hp_client:
+                    offset_token = f"{job_id}_ps_batch_{batch_counter}"
+                    hp_client.write_rows(rows, offset_token=offset_token)
+                else:
+                    session = get_valid_session()
+                    if session:
+                        columns = list(rows[0].keys())
+                        data = [[row.get(c) for c in columns] for row in rows]
+                        df = session.create_dataframe(data, schema=columns)
+                        df.write.mode("append").save_as_table(target_table)
+
+                batch_latency_ms = (time.time() - batch_start) * 1000
+
+                with streaming_lock:
+                    if job_id in active_streaming_jobs:
+                        s = active_streaming_jobs[job_id]['stats']
+                        s['total_rows'] += len(rows)
+                        s['batches_sent'] += 1
+                        s['last_batch_time'] = datetime.now()
+                        lats = s.get('batch_latencies', [])
+                        lats.append(batch_latency_ms)
+                        if len(lats) > 1000:
+                            lats = lats[-1000:]
+                        s['batch_latencies'] = lats
+                        elapsed = (datetime.now() - s['start_time']).total_seconds() or 1
+                        rps = s['total_rows'] / elapsed
+                        if rps > s.get('peak_rps', 0):
+                            s['peak_rps'] = rps
+            except Exception as e:
+                logger.error(f"[{job_id}] PubSub flush error: {e}")
+                with streaming_lock:
+                    if job_id in active_streaming_jobs:
+                        active_streaming_jobs[job_id]['stats']['errors'] += 1
+
+        def callback(message):
+            nonlocal batch_buffer
+            # Check stop signal
+            with streaming_lock:
+                if job_id not in active_streaming_jobs:
+                    message.nack()
+                    return
+                if active_streaming_jobs[job_id]['status'] == 'STOPPING':
+                    message.nack()
+                    return
+
+            try:
+                body = json.loads(message.data.decode("utf-8"))
+            except Exception:
+                body = {"raw_data": message.data.decode("utf-8", errors="replace")}
+
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            row = {
+                "METER_ID": str(body.get("meter_id", body.get("device_id", body.get("id", "PS-UNKNOWN")))),
+                "READING_TIMESTAMP": str(body.get("reading_ts", body.get("timestamp", ts))),
+                "USAGE_KWH": float(body.get("reading_value", body.get("value", body.get("usage_kwh", 0)))),
+                "VOLTAGE": float(body.get("voltage", 120.0)),
+                "TEMPERATURE_C": float(body.get("temperature_c", body.get("temperature", 25.0))),
+                "SERVICE_AREA": str(body.get("service_area", "UNKNOWN")),
+                "CUSTOMER_SEGMENT": str(body.get("customer_segment", "RESIDENTIAL")),
+                "TRANSFORMER_ID": str(body.get("transformer_id", "")),
+                "SUBSTATION_ID": str(body.get("substation_id", "")),
+                "IS_OUTAGE": bool(body.get("is_outage", False)),
+                "DATA_QUALITY": str(body.get("quality", body.get("data_quality", "VALID"))),
+                "INGESTION_TIMESTAMP": ts,
+            }
+            message.ack()
+
+            with buffer_lock:
+                batch_buffer.append(row)
+                if len(batch_buffer) >= batch_size:
+                    _flush(batch_buffer[:])
+                    batch_buffer.clear()
+
+        subscriber = pubsub_v1.SubscriberClient()
+        subscription_path = subscriber.subscription_path(ps_project, ps_subscription)
+        logger.info(f"[{job_id}] Subscribing to: {subscription_path}")
+
+        streaming_pull_future = subscriber.subscribe(subscription_path, callback=callback)
+
+        # Block until stop requested
+        while True:
+            with streaming_lock:
+                if job_id not in active_streaming_jobs:
+                    break
+                if active_streaming_jobs[job_id]['status'] == 'STOPPING':
+                    break
+            time.sleep(1)
+
+        # Flush remaining
+        with buffer_lock:
+            if batch_buffer:
+                _flush(batch_buffer[:])
+                batch_buffer.clear()
+
+    except ImportError:
+        logger.error(f"[{job_id}] google-cloud-pubsub not installed")
+        with streaming_lock:
+            if job_id in active_streaming_jobs:
+                active_streaming_jobs[job_id]['stats']['errors'] += 1
+    except Exception as e:
+        logger.exception(f"[{job_id}] PubSub worker error: {e}")
+        with streaming_lock:
+            if job_id in active_streaming_jobs:
+                active_streaming_jobs[job_id]['stats']['errors'] += 1
+    finally:
+        if streaming_pull_future:
+            try:
+                streaming_pull_future.cancel()
+                streaming_pull_future.result(timeout=5)
+            except Exception:
+                pass
+        if subscriber:
+            try:
+                subscriber.close()
+            except Exception:
+                pass
+        if hp_client:
+            try:
+                hp_client.close()
+            except Exception:
+                pass
+        with streaming_lock:
+            if job_id in active_streaming_jobs:
+                active_streaming_jobs[job_id]['status'] = 'STOPPED'
+        logger.info(f"[{job_id}] PubSub worker finished")
+
+
+# ============================================================================
+# V1 vs V2 COMPARISON STREAMING WORKER (Main App)
+# ============================================================================
+
+def comparison_streaming_worker(job_id: str, config: dict):
+    """
+    Background worker that runs HP SDK (V2) and Classic SQL INSERT (V1)
+    in parallel on the same generated data, tracking separate latency stats
+    for side-by-side comparison.
+    """
+    global active_streaming_jobs, snowflake_session
+
+    logger.info(f"[{job_id}] Starting V1 vs V2 comparison worker")
+
+    meters = config.get('meters', 1000)
+    rows_per_sec = config.get('rows_per_sec', 100)
+    batch_size = config.get('batch_size', 100)
+    service_area = config.get('service_area', 'TEXAS_GULF_COAST')
+    emission_pattern = config.get('emission_pattern', 'STAGGERED_REALISTIC')
+    production_source = config.get('production_source', 'SYNTHETIC')
+    data_format = config.get('data_format', 'standard')
+    target_table = config.get('target_table', '')
+    pipe_name = config.get('pipe_name', 'AMI_STREAMING_PIPE')
+
+    # Create a second table for SQL INSERT comparison
+    sql_insert_table = target_table + '_SQL_COMPARE' if target_table else ''
+
+    # Initialize comparison stats
+    # NOTE: "HP SDK" = real Snowpipe Streaming V2 (pipe-based, Python SDK)
+    #        "SQL INSERT" = direct INSERT INTO via Snowpark session (NOT the Java-only Classic V1 SDK)
+    stats = {
+        'total_rows': 0, 'batches_sent': 0, 'errors': 0,
+        'start_time': datetime.now(), 'last_batch_time': None,
+        'mechanism': 'comparison', 'batch_latencies': [], 'peak_rps': 0,
+        'hp_sdk_latencies': [], 'sql_insert_latencies': [],
+        'hp_sdk_rows': 0, 'sql_insert_rows': 0,
+        'hp_sdk_errors': 0, 'sql_insert_errors': 0,
+    }
+
+    with streaming_lock:
+        if job_id in active_streaming_jobs:
+            active_streaming_jobs[job_id]['stats'] = stats
+            active_streaming_jobs[job_id]['status'] = 'RUNNING'
+
+    # Initialize HP SDK client for pipe-based streaming
+    hp_client = None
+    from snowpipe_streaming_impl import is_running_in_spcs
+    has_hp_creds = is_running_in_spcs() or os.environ.get('SNOWFLAKE_PRIVATE_KEY') or os.environ.get('SNOWFLAKE_PRIVATE_KEY_PATH') or _connection_params.get('auth_mode') == 'keypair'
+    if not has_hp_creds:
+        logger.info(f"[{job_id}] Not in SPCS — comparison will only run SQL INSERT")
+    else:
+        try:
+            from snowpipe_streaming_impl import HPStreamingClient, SnowpipeStreamingConfig
+            hp_config = SnowpipeStreamingConfig(
+                architecture='hp',
+                pipe_name=pipe_name,
+                client_name=f'flux_cmp_hp_{job_id}',
+                channel_name=f'flux_cmp_ch_{job_id}',
+            )
+            hp_client = HPStreamingClient(hp_config)
+            if not hp_client.initialize():
+                logger.error(f"[{job_id}] HP SDK init failed — comparison will only run SQL INSERT")
+                hp_client = None
+        except Exception as e:
+            logger.error(f"[{job_id}] HP SDK error: {e} — comparison will only run SQL INSERT")
+            hp_client = None
+
+    # Ensure SQL INSERT comparison table exists
+    try:
+        session = get_valid_session()
+        if session and sql_insert_table:
+            session.sql(f"CREATE TABLE IF NOT EXISTS {sql_insert_table} LIKE {target_table}").collect()
+            logger.info(f"[{job_id}] SQL INSERT comparison table ready: {sql_insert_table}")
+    except Exception as e:
+        logger.warning(f"[{job_id}] Could not create SQL INSERT comparison table: {e}")
+
+    # Generate synthetic meter fleet (same as snowpipe_streaming_worker)
+    meter_fleet = []
+    try:
+        session = get_valid_session()
+        if session and production_source != 'SYNTHETIC':
+            src_cfg = PRODUCTION_DATA_SOURCES.get(production_source)
+            if src_cfg:
+                result = session.sql(f"""
+                    SELECT {src_cfg['meter_col']} as meter_id
+                    FROM {src_cfg['table']}
+                    ORDER BY RANDOM() LIMIT {meters}
+                """).collect()
+                for row in result:
+                    meter_fleet.append({
+                        'meter_id': row['METER_ID'],
+                        'transformer_id': f'XFMR-CMP-{len(meter_fleet):05d}',
+                        'circuit_id': f'CIRCUIT-CMP-{len(meter_fleet) // 100:04d}',
+                        'substation_id': f'SUB-CMP-{len(meter_fleet) // 1000:03d}',
+                        'customer_segment': 'RESIDENTIAL',
+                        'latitude': 29.7604 + random.uniform(-0.5, 0.5),
+                        'longitude': -95.3698 + random.uniform(-0.5, 0.5),
+                        'production_matched': True,
+                    })
+    except Exception:
+        pass
+
+    if not meter_fleet:
+        for i in range(meters):
+            segment = 'INDUSTRIAL' if i % 10 == 1 else ('COMMERCIAL' if i % 10 == 0 else 'RESIDENTIAL')
+            meter_fleet.append({
+                'meter_id': f'MTR-CMP-{i:06d}',
+                'transformer_id': f'XFMR-CMP-{i // 10:05d}',
+                'circuit_id': f'CIRCUIT-CMP-{i // 100:04d}',
+                'substation_id': f'SUB-CMP-{i // 1000:03d}',
+                'customer_segment': segment,
+                'latitude': 29.7604 + random.uniform(-0.5, 0.5),
+                'longitude': -95.3698 + random.uniform(-0.5, 0.5),
+                'production_matched': False,
+            })
+
+    batch_interval = batch_size / max(rows_per_sec, 1)
+    batch_counter = 0
+
+    # --- Grid topology state: correlated outages & voltage cascading ---
+    grid_state = GridTopologyState()
+    for m in meter_fleet:
+        grid_state.register_meter(m)
+
+    while True:
+        with streaming_lock:
+            if job_id not in active_streaming_jobs:
+                break
+            if active_streaming_jobs[job_id]['status'] == 'STOPPING':
+                active_streaming_jobs[job_id]['status'] = 'STOPPED'
+                break
+
+        try:
+            # Advance grid topology (probabilistic outage/recovery transitions)
+            grid_state.tick()
+
+            batch = []
+            for _ in range(min(batch_size, len(meter_fleet))):
+                meter = random.choice(meter_fleet)
+                if data_format == 'itron_grid_planning':
+                    reading = generate_itron_grid_planning_row(
+                        meter, service_area, grid_state=grid_state)
+                elif data_format == 'symphony_iris':
+                    reading = generate_symphony_iris_row(
+                        meter, service_area, grid_state=grid_state)
+                elif data_format == 'carto_spatial':
+                    reading = generate_carto_spatial_row(
+                        meter, service_area, grid_state=grid_state)
+                elif data_format == 'siemens_edge':
+                    reading = generate_siemens_edge_row(
+                        meter, service_area, grid_state=grid_state)
+                else:
+                    reading = generate_ami_reading(meter, service_area, emission_pattern,
+                                                   grid_state=grid_state)
+                batch.append(reading)
+
+            if not batch:
+                time.sleep(max(batch_interval, 0.1))
+                continue
+
+            batch_counter += 1
+
+            # HP SDK — pipe-based Snowpipe Streaming (the real V2 path)
+            hp_latency = None
+            if hp_client:
+                try:
+                    offset_token = f"{job_id}_cmp_hp_{batch_counter}"
+                    t0 = time.time()
+                    hp_client.write_rows(batch, offset_token=offset_token)
+                    hp_latency = (time.time() - t0) * 1000
+                except Exception as e:
+                    logger.error(f"[{job_id}] HP SDK batch error: {e}")
+                    with streaming_lock:
+                        if job_id in active_streaming_jobs:
+                            active_streaming_jobs[job_id]['stats']['hp_sdk_errors'] += 1
+
+            # SQL INSERT — direct INSERT INTO via Snowpark (Python equivalent, NOT the Java Classic SDK)
+            sql_latency = None
+            try:
+                session = get_valid_session()
+                if session and sql_insert_table:
+                    columns = list(batch[0].keys())
+                    data = [[row.get(c) for c in columns] for row in batch]
+                    df = session.create_dataframe(data, schema=columns)
+                    t0 = time.time()
+                    df.write.mode("append").save_as_table(sql_insert_table)
+                    sql_latency = (time.time() - t0) * 1000
+            except Exception as e:
+                logger.error(f"[{job_id}] SQL INSERT batch error: {e}")
+                with streaming_lock:
+                    if job_id in active_streaming_jobs:
+                        active_streaming_jobs[job_id]['stats']['sql_insert_errors'] += 1
+
+            # Update stats
+            with streaming_lock:
+                if job_id in active_streaming_jobs:
+                    s = active_streaming_jobs[job_id]['stats']
+                    s['total_rows'] += len(batch)
+                    s['batches_sent'] += 1
+                    s['last_batch_time'] = datetime.now()
+                    if hp_latency is not None:
+                        s['hp_sdk_rows'] += len(batch)
+                        lats = s.get('hp_sdk_latencies', [])
+                        lats.append(hp_latency)
+                        if len(lats) > 1000:
+                            lats = lats[-1000:]
+                        s['hp_sdk_latencies'] = lats
+                    if sql_latency is not None:
+                        s['sql_insert_rows'] += len(batch)
+                        lats = s.get('sql_insert_latencies', [])
+                        lats.append(sql_latency)
+                        if len(lats) > 1000:
+                            lats = lats[-1000:]
+                        s['sql_insert_latencies'] = lats
+                    # Combined latencies for overall perf
+                    combined = hp_latency if hp_latency is not None else sql_latency
+                    if combined is not None:
+                        all_lats = s.get('batch_latencies', [])
+                        all_lats.append(combined)
+                        if len(all_lats) > 1000:
+                            all_lats = all_lats[-1000:]
+                        s['batch_latencies'] = all_lats
+                    elapsed = (datetime.now() - s['start_time']).total_seconds() or 1
+                    rps = s['total_rows'] / elapsed
+                    if rps > s.get('peak_rps', 0):
+                        s['peak_rps'] = rps
+                    s['grid_topology'] = grid_state.summary()
+
+            time.sleep(max(batch_interval, 0.1))
+
+        except Exception as e:
+            logger.error(f"[{job_id}] Comparison worker error: {e}")
+            with streaming_lock:
+                if job_id in active_streaming_jobs:
+                    active_streaming_jobs[job_id]['stats']['errors'] += 1
+            time.sleep(1)
+
+    if hp_client:
+        try:
+            hp_client.close()
+        except Exception:
+            pass
+
+    logger.info(f"[{job_id}] Comparison worker finished")
 
 
 def raw_json_s3_streaming_worker(job_id: str, config: dict):
@@ -1623,19 +2262,13 @@ def preload_dependencies_background():
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+def _post_connect_setup():
+    """Run stale-job reconciliation and dependency preloading after a session is established."""
     global snowflake_session
-    logger.info("Starting FLUX Data Forge...")
-    snowflake_session = create_snowflake_session()
-    logger.info("Snowflake connected!")
-    
-    #  Reconcile stale job states on startup
-    # Jobs marked as RUNNING in DB are stale if they're not in our active_streaming_jobs
-    # This happens when the service restarts - in-memory jobs are lost but DB state persists
     try:
         if snowflake_session:
             logger.info("Reconciling stale streaming job states...")
-            reconcile_result = snowflake_session.sql(f"""
+            snowflake_session.sql(f"""
                 UPDATE {DB}.{SCHEMA_PRODUCTION}.STREAMING_JOBS 
                 SET STATUS = 'STALE', 
                     UPDATED_AT = CURRENT_TIMESTAMP()
@@ -1644,15 +2277,24 @@ async def lifespan(app: FastAPI):
             logger.info("Stale job reconciliation complete - marked orphaned RUNNING jobs as STALE")
     except Exception as e:
         logger.warning(f"Could not reconcile stale jobs: {e}")
-    
-    #  Start background preloading of dependencies (tables, pipes, stages)
-    # This improves UX by having data ready when user navigates to pipeline steps
     try:
         preload_thread = threading.Thread(target=preload_dependencies_background, daemon=True)
         preload_thread.start()
         logger.info("Started background dependency preloading thread")
     except Exception as e:
         logger.warning(f"Could not start background preload: {e}")
+
+
+async def lifespan(app: FastAPI):
+    global snowflake_session
+    logger.info("Starting FLUX Data Forge...")
+    try:
+        snowflake_session = create_snowflake_session()
+        logger.info("Snowflake connected!")
+        _post_connect_setup()
+    except Exception as e:
+        logger.warning(f"No auto-connection available — waiting for user to connect via UI. ({e})")
+        snowflake_session = None
     
     yield
     logger.info("Shutting down...")
@@ -1882,12 +2524,107 @@ finally:
     channel.close()
     client.close()"""
 
+    # --- Tab 5: EventHub → HP SDK Bridge ---
+    eventhub_code = f"""#!/usr/bin/env python3
+\"\"\"Azure EventHub -> Snowflake HP Streaming bridge.
+
+Consumes events from Azure EventHub and streams them into
+Snowflake via Snowpipe Streaming HP SDK (V2).
+
+Requires:
+    pip install snowpipe-streaming azure-eventhub cryptography
+\"\"\"
+import json, time, threading
+from datetime import datetime, timezone
+from azure.eventhub import EventHubConsumerClient
+from snowflake.ingest.streaming import StreamingIngestClient
+
+# ── Snowflake config (uses wizard values) ─────────────
+ACCOUNT  = "{P['account']}"
+USER     = "{P['user']}"
+ROLE     = "{P['role']}"
+DATABASE = "{P['database']}"
+SCHEMA   = "{P['schema']}"
+PIPE     = "{P['pipe']}"
+KEY_PATH = "rsa_key.p8"  # PKCS8 PEM
+
+# ── EventHub config ───────────────────────────────────
+EVENTHUB_CONN_STR = "<Endpoint=sb://...>"
+EVENTHUB_NAME     = "<hub-name>"
+CONSUMER_GROUP    = "$Default"
+BATCH_SIZE = 500
+
+# ── Setup HP SDK client & channel ─────────────────────
+with open(KEY_PATH) as f:
+    key = f.read()
+
+client = StreamingIngestClient(
+    client_name="eventhub_bridge",
+    db_name=DATABASE, schema_name=SCHEMA, pipe_name=PIPE,
+    properties={{
+        "url": f"https://{{ACCOUNT}}.snowflakecomputing.com",
+        "account": ACCOUNT, "user": USER,
+        "private_key": key, "role": ROLE,
+    }},
+)
+channel, _ = client.open_channel(channel_name="eh_ch_0")
+
+# ── Buffer & flush logic ─────────────────────────────
+buffer = []
+lock = threading.Lock()
+batch_num = 0
+
+def flush():
+    global batch_num
+    with lock:
+        if not buffer:
+            return
+        rows = list(buffer)
+        buffer.clear()
+    token = f"batch_{{batch_num}}"
+    channel.append_rows(rows=rows,
+        start_offset_token=token, end_offset_token=token)
+    channel.initiate_flush()
+    channel.wait_for_flush(timeout_seconds=30)
+    batch_num += 1
+    print(f"Flushed batch {{batch_num}}: {{len(rows)}} rows")
+
+# ── EventHub consumer callback ────────────────────────
+def on_event(partition_context, event):
+    try:
+        body = json.loads(event.body_as_str())
+    except Exception:
+        body = {{"RAW_DATA": event.body_as_str()}}
+    body["_PARTITION"] = partition_context.partition_id
+    body["_ENQUEUED_AT"] = str(event.enqueued_time)
+    body["_INGESTED_AT"] = datetime.now(timezone.utc).isoformat()
+    with lock:
+        buffer.append(body)
+        if len(buffer) >= BATCH_SIZE:
+            flush()
+
+# ── Main loop ─────────────────────────────────────────
+consumer = EventHubConsumerClient.from_connection_string(
+    EVENTHUB_CONN_STR, CONSUMER_GROUP,
+    eventhub_name=EVENTHUB_NAME,
+)
+print("Listening for EventHub events... (Ctrl+C to stop)")
+try:
+    with consumer:
+        consumer.receive(on_event=on_event, starting_position="-1")
+except KeyboardInterrupt:
+    flush()  # drain remaining
+    channel.close()
+    client.close()
+    print("Shutdown complete.")"""
+
     # Doc links for each tab annotation
     doc_links = {
         'setup': '<a class="code-doc-link" href="https://docs.snowflake.com/en/user-guide/snowpipe-streaming/snowpipe-streaming-high-performance-getting-started" target="_blank">Getting Started Tutorial &nearr;</a>',
         'ddl': '<a class="code-doc-link" href="https://docs.snowflake.com/en/sql-reference/sql/create-pipe" target="_blank">CREATE PIPE Reference &nearr;</a>',
         'stream': '<a class="code-doc-link" href="https://docs.snowflake.com/en/user-guide/data-load-snowpipe-streaming-python-sdk-reference" target="_blank">Python SDK Reference &nearr;</a>',
         'app': '<a class="code-doc-link" href="https://pypi.org/project/snowpipe-streaming/" target="_blank">PyPI: snowpipe-streaming &nearr;</a>',
+        'eventhub': '<a class="code-doc-link" href="https://learn.microsoft.com/en-us/azure/event-hubs/event-hubs-python-get-started-send" target="_blank">Azure EventHub SDK &nearr;</a>',
     }
 
     tabs = [
@@ -1895,6 +2632,7 @@ finally:
         ("ddl", "2. Create PIPE", pipe_ddl, "Define your target table and streaming PIPE with server-side transforms.", "sql", None),
         ("stream", "3. Stream Data", stream_code, "Connect, open a channel, stream rows, flush, done. That's the whole SDK.", "python", 7),
         ("app", "4. Full App", full_app_code, "A complete streaming app in ~35 lines. Copy, edit credentials, run.", "python", 35),
+        ("eventhub", "5. EventHub Bridge", eventhub_code, "Stream from Azure EventHub into Snowflake via HP SDK. Production-ready bridge pattern.", "python", 40),
     ]
 
     def _inject_param_spans(html: str) -> str:
@@ -2167,6 +2905,10 @@ def get_base_styles():
             box-shadow: 0 0 8px rgba(34, 197, 94, 0.5);
         }
         .status-dot.active { animation: pulse 2s infinite; }
+        .status-dot.disconnected {
+            background: #f87171;
+            box-shadow: 0 0 8px rgba(248, 113, 113, 0.5);
+        }
         @keyframes pulse {
             0%, 100% { opacity: 1; box-shadow: 0 0 8px rgba(34, 197, 94, 0.5); }
             50% { opacity: 0.5; box-shadow: 0 0 12px rgba(34, 197, 94, 0.8); }
@@ -2510,6 +3252,29 @@ def get_base_styles():
         input::placeholder {
             color: var(--color-text-muted);
         }
+        input:disabled, select:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            background: var(--color-bg-tertiary);
+        }
+        
+        /* Loading spinner */
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(56, 189, 248, 0.2);
+            border-top-color: #38bdf8;
+            border-radius: 50%;
+            animation: spin 0.6s linear infinite;
+        }
+        .spinner.white {
+            border-color: rgba(255, 255, 255, 0.2);
+            border-top-color: white;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
         
         input[type="range"] {
             -webkit-appearance: none;
@@ -2581,6 +3346,28 @@ def get_base_styles():
             box-shadow: var(--shadow-neu-pressed);
             transform: translateY(0);
         }
+        
+        /* Pipeline step action buttons */
+        .btn-step {
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 6px 10px;
+            font-size: 0.7rem;
+            cursor: pointer;
+            width: 100%;
+            transition: all 0.2s ease;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+        }
+        .btn-step:hover { filter: brightness(1.1); transform: translateY(-1px); }
+        .btn-step:active { transform: translateY(0); }
+        .btn-step.cyan { background: #0ea5e9; }
+        .btn-step.green { background: #22c55e; }
+        .btn-step.blue { background: #38bdf8; }
+        .btn-step.purple { background: #a855f7; }
         
         .main-content {
             display: grid;
@@ -3038,26 +3825,547 @@ def get_header_html():
 
 
 def get_status_bar_html():
-    env_info = {
-        "account": os.getenv('SNOWFLAKE_ACCOUNT', 'N/A'),
-        "database": os.getenv('SNOWFLAKE_DATABASE', 'FLUX_DB'),
-        "schema": os.getenv('SNOWFLAKE_SCHEMA', 'PRODUCTION'),
-    }
+    connected = snowflake_session is not None
+    if connected:
+        try:
+            row = snowflake_session.sql(
+                "SELECT CURRENT_ACCOUNT(), CURRENT_DATABASE(), CURRENT_SCHEMA(), "
+                "CURRENT_ROLE(), CURRENT_WAREHOUSE(), CURRENT_USER()"
+            ).collect()[0]
+            acct, db, schema = str(row[0]), str(row[1]), str(row[2])
+            role, wh, user = str(row[3]), str(row[4]), str(row[5])
+        except Exception:
+            acct, db, schema = "N/A", "N/A", "N/A"
+            role, wh, user = "N/A", "N/A", "N/A"
+        dot_class = "status-dot active"
+        label = "Connected"
+        auth_mode = _connection_params.get('auth_mode', 'password')
+        if auth_mode == 'keypair':
+            auth_badge = ('<span style="display:inline-flex;align-items:center;gap:4px;'
+                          'padding:2px 8px;border-radius:4px;font-size:0.75rem;font-weight:600;'
+                          'background:rgba(34,197,94,0.12);color:#4ade80;border:1px solid rgba(34,197,94,0.25);">'
+                          '&#x1f511; Key-Pair</span>')
+        else:
+            auth_badge = ('<span style="display:inline-flex;align-items:center;gap:4px;'
+                          'padding:2px 8px;border-radius:4px;font-size:0.75rem;font-weight:600;'
+                          'background:rgba(245,158,11,0.12);color:#fbbf24;border:1px solid rgba(245,158,11,0.25);">'
+                          '&#x1f512; Password</span>')
+    else:
+        acct, db, schema = "---", "---", "---"
+        role, wh, user = "---", "---", "---"
+        dot_class = "status-dot disconnected"
+        label = "Not Connected"
+        auth_badge = ""
+
+    disconnect_btn = (
+        '<button onclick="fluxDisconnect()" style="margin-left:auto;padding:4px 12px;'
+        'border:1px solid rgba(248,113,113,0.4);border-radius:6px;background:transparent;'
+        'color:#f87171;font-size:0.8125rem;cursor:pointer;transition:all 0.15s;" '
+        'onmouseover="this.style.background=&quot;rgba(248,113,113,0.1)&quot;" '
+        'onmouseout="this.style.background=&quot;transparent&quot;">Disconnect</button>'
+        '<script>function fluxDisconnect(){if(!confirm("Disconnect from Snowflake?"))return;'
+        'fetch("/api/disconnect",{method:"POST"}).then(()=>window.location.reload());}</script>'
+    ) if connected else ''
+
     return f"""
-    <div class="status-bar">
+    <div class="status-bar" id="flux-status-bar">
         <div class="status-item">
-            <div class="status-dot"></div>
-            <span class="status-value">Snowflake Connected</span>
+            <div class="{dot_class}" id="sb-dot"></div>
+            <span class="status-value" id="sb-label">{label}</span>
+            <span id="sb-auth">{auth_badge}</span>
         </div>
         <div class="status-item">
             <span class="status-label">Account:</span>
-            <span class="status-value">{env_info['account']}</span>
+            <span class="status-value" id="sb-account">{acct}</span>
+        </div>
+        <div class="status-item">
+            <span class="status-label">User:</span>
+            <span class="status-value" id="sb-user">{user}</span>
+        </div>
+        <div class="status-item">
+            <span class="status-label">Role:</span>
+            <span class="status-value" id="sb-role">{role}</span>
+        </div>
+        <div class="status-item">
+            <span class="status-label">Warehouse:</span>
+            <span class="status-value" id="sb-wh">{wh}</span>
         </div>
         <div class="status-item">
             <span class="status-label">Target:</span>
-            <span class="status-value">{env_info['database']}.{env_info['schema']}</span>
+            <span class="status-value" id="sb-target">{db}.{schema}</span>
         </div>
+        {disconnect_btn}
     </div>
+    <script>
+    (function() {{
+        let _sbTimer = null;
+        function refreshStatusBar() {{
+            fetch('/api/connection-status').then(r => r.json()).then(d => {{
+                const dot = document.getElementById('sb-dot');
+                const lbl = document.getElementById('sb-label');
+                const auth = document.getElementById('sb-auth');
+                if (!dot) return;
+                if (d.connected) {{
+                    dot.className = 'status-dot active';
+                    lbl.textContent = 'Connected';
+                    document.getElementById('sb-account').textContent = d.account || '---';
+                    document.getElementById('sb-user').textContent = d.user || '---';
+                    document.getElementById('sb-role').textContent = d.role || '---';
+                    document.getElementById('sb-wh').textContent = d.warehouse || '---';
+                    document.getElementById('sb-target').textContent =
+                        (d.database || '---') + '.' + (d.schema || '---');
+                    if (d.auth_mode === 'keypair') {{
+                        auth.innerHTML = '<span style="display:inline-flex;align-items:center;gap:4px;'
+                            + 'padding:2px 8px;border-radius:4px;font-size:0.75rem;font-weight:600;'
+                            + 'background:rgba(34,197,94,0.12);color:#4ade80;border:1px solid rgba(34,197,94,0.25);">'
+                            + '&#x1f511; Key-Pair</span>';
+                    }} else {{
+                        auth.innerHTML = '<span style="display:inline-flex;align-items:center;gap:4px;'
+                            + 'padding:2px 8px;border-radius:4px;font-size:0.75rem;font-weight:600;'
+                            + 'background:rgba(245,158,11,0.12);color:#fbbf24;border:1px solid rgba(245,158,11,0.25);">'
+                            + '&#x1f512; Password</span>';
+                    }}
+                }} else {{
+                    dot.className = 'status-dot disconnected';
+                    lbl.textContent = 'Not Connected';
+                    auth.innerHTML = '';
+                    ['sb-account','sb-user','sb-role','sb-wh','sb-target'].forEach(
+                        id => {{ const el = document.getElementById(id); if(el) el.textContent = '---'; }}
+                    );
+                }}
+            }}).catch(() => {{}});
+        }}
+        // Poll every 30s
+        if (!window._sbPolling) {{
+            window._sbPolling = true;
+            _sbTimer = setInterval(refreshStatusBar, 30000);
+        }}
+    }})();
+    </script>
+    {_get_connection_modal_html() if not connected else ""}
+    """
+
+
+def _get_connection_modal_html():
+    """Connection overlay shown when app starts without a Snowflake session."""
+    return """
+    <style>
+      @keyframes connFadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+      @keyframes connSpin { to { transform:rotate(360deg); } }
+      #conn-overlay input:focus, #conn-overlay select:focus, #conn-overlay textarea:focus {
+        border-color: var(--color-accent) !important;
+        box-shadow: 0 0 0 2px rgba(56,189,248,0.15) !important;
+        outline: none;
+      }
+      #conn-overlay input, #conn-overlay select, #conn-overlay textarea {
+        transition: border-color 0.15s, box-shadow 0.15s;
+      }
+      .conn-spinner {
+        display:inline-block; width:14px; height:14px; border:2px solid transparent;
+        border-top-color:currentColor; border-radius:50%; animation:connSpin 0.6s linear infinite;
+        vertical-align:middle; margin-right:6px;
+      }
+      .conn-section-label {
+        font-size:0.7rem; font-weight:600; text-transform:uppercase; letter-spacing:0.06em;
+        color:var(--color-text-muted); margin-bottom:10px; padding-top:4px;
+        border-top:1px solid var(--color-border-subtle);
+      }
+      .conn-section-label:first-of-type { border-top:none; padding-top:0; }
+    </style>
+
+    <div id="conn-overlay" style="
+        position:fixed; inset:0; z-index:9999;
+        background:rgba(15,23,42,0.92); backdrop-filter:blur(6px);
+        display:flex; align-items:center; justify-content:center;
+    ">
+      <div style="
+        background:var(--color-bg-secondary); border:1px solid var(--color-border-subtle);
+        border-radius:var(--radius-lg); width:500px; max-width:92vw;
+        box-shadow:0 24px 48px rgba(0,0,0,0.5); max-height:90vh; overflow-y:auto;
+        overflow-x:hidden; position:relative;
+      ">
+        <!-- Accent gradient stripe -->
+        <div style="height:3px;background:linear-gradient(90deg,#38bdf8,#6366f1,#38bdf8);border-radius:var(--radius-lg) var(--radius-lg) 0 0;"></div>
+
+        <div style="padding:28px 32px 32px;">
+
+        <!-- Header -->
+        <div style="display:flex;align-items:center;gap:14px;margin-bottom:22px;">
+          <div style="width:40px;height:40px;border-radius:var(--radius-md);background:rgba(41,181,232,0.1);display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <!-- Snowflake geometric mark: 6-arm star with center dot -->
+              <circle cx="12" cy="12" r="1.8" fill="#29B5E8"/>
+              <!-- Vertical arm -->
+              <rect x="11" y="2" width="2" height="8" rx="1" fill="#29B5E8"/>
+              <rect x="11" y="14" width="2" height="8" rx="1" fill="#29B5E8"/>
+              <!-- Top-right / bottom-left arm -->
+              <rect x="11" y="2" width="2" height="8" rx="1" fill="#29B5E8" transform="rotate(60 12 12)"/>
+              <rect x="11" y="14" width="2" height="8" rx="1" fill="#29B5E8" transform="rotate(60 12 12)"/>
+              <!-- Top-left / bottom-right arm -->
+              <rect x="11" y="2" width="2" height="8" rx="1" fill="#29B5E8" transform="rotate(-60 12 12)"/>
+              <rect x="11" y="14" width="2" height="8" rx="1" fill="#29B5E8" transform="rotate(-60 12 12)"/>
+              <!-- Branch tips -->
+              <circle cx="12" cy="3" r="1.2" fill="#29B5E8"/>
+              <circle cx="12" cy="21" r="1.2" fill="#29B5E8"/>
+              <circle cx="4.2" cy="7.5" r="1.2" fill="#29B5E8"/>
+              <circle cx="19.8" cy="16.5" r="1.2" fill="#29B5E8"/>
+              <circle cx="4.2" cy="16.5" r="1.2" fill="#29B5E8"/>
+              <circle cx="19.8" cy="7.5" r="1.2" fill="#29B5E8"/>
+            </svg>
+          </div>
+          <div>
+            <div style="font-size:1.15rem;font-weight:600;color:var(--color-text-primary);">Connect to Snowflake</div>
+            <div style="font-size:0.8rem;color:var(--color-text-muted);">Enter credentials or select a saved connection</div>
+          </div>
+        </div>
+
+        <!-- Saved connections dropdown -->
+        <div id="conn-saved-section" style="margin-bottom:18px;">
+          <label style="font-size:0.78rem;color:var(--color-text-muted);font-weight:500;">Saved Connection
+            <select id="conn-saved" onchange="loadSavedConnection(this.value)" style="
+              width:100%;margin-top:4px;padding:10px 12px;background:var(--color-bg-primary);
+              border:1px solid var(--color-border);border-radius:var(--radius-sm);
+              color:var(--color-text-primary);font-size:0.88rem;box-sizing:border-box;
+            ">
+              <option value="">-- Manual entry --</option>
+            </select>
+          </label>
+        </div>
+
+        <form id="conn-form" onsubmit="submitConnect(event)" style="display:flex;flex-direction:column;gap:16px;">
+          <input type="hidden" name="auth_mode" id="conn-auth-mode" value="password">
+          <input type="hidden" name="connection_name" id="conn-name-hidden" value="">
+
+          <!-- Credentials section -->
+          <div class="conn-section-label">Credentials</div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+            <label style="font-size:0.78rem;color:var(--color-text-muted);font-weight:500;">Account
+              <input name="account" id="conn-account" required placeholder="e.g. GZB42423" style="
+                width:100%;margin-top:4px;padding:10px 12px;background:var(--color-bg-primary);
+                border:1px solid var(--color-border);border-radius:var(--radius-sm);
+                color:var(--color-text-primary);font-size:0.88rem;box-sizing:border-box;
+              ">
+            </label>
+            <label style="font-size:0.78rem;color:var(--color-text-muted);font-weight:500;">User
+              <input name="user" id="conn-user" required placeholder="e.g. MY_USER" style="
+                width:100%;margin-top:4px;padding:10px 12px;background:var(--color-bg-primary);
+                border:1px solid var(--color-border);border-radius:var(--radius-sm);
+                color:var(--color-text-primary);font-size:0.88rem;box-sizing:border-box;
+              ">
+            </label>
+          </div>
+
+          <!-- Auth toggle (inside credentials section) -->
+          <div>
+            <div style="font-size:0.78rem;color:var(--color-text-muted);font-weight:500;margin-bottom:6px;">Authentication</div>
+            <div style="display:flex;gap:0;border:1px solid var(--color-border);border-radius:var(--radius-sm);overflow:hidden;">
+              <button type="button" id="auth-pw-btn" onclick="setAuthMode('password')" style="
+                flex:1;padding:7px;border:none;font-size:0.78rem;font-weight:600;cursor:pointer;
+                background:#38bdf8;color:#0f172a;transition:all 0.15s;
+              ">Password</button>
+              <button type="button" id="auth-kp-btn" onclick="setAuthMode('keypair')" style="
+                flex:1;padding:7px;border:none;font-size:0.78rem;font-weight:600;cursor:pointer;
+                background:var(--color-bg-tertiary);color:var(--color-text-muted);transition:all 0.15s;
+              ">Key-Pair</button>
+            </div>
+            <div style="margin-top:6px;padding:6px 10px;background:rgba(56,189,248,0.06);
+              border:1px solid rgba(56,189,248,0.15);border-radius:var(--radius-sm);
+              font-size:0.7rem;color:#7dd3fc;display:flex;align-items:flex-start;gap:6px;line-height:1.45;">
+              <span style="flex-shrink:0;margin-top:1px;">&#9432;</span>
+              <span>High-Performance Snowpipe Streaming requires <strong>Key-Pair</strong> authentication.
+              Password auth will fall back to standard SQL INSERT for streaming — not the native Snowpipe Streaming SDK.</span>
+            </div>
+          </div>
+
+          <!-- Password field -->
+          <div id="pw-section">
+            <label style="font-size:0.78rem;color:var(--color-text-muted);font-weight:500;">Password
+              <input name="password" id="conn-password" type="password" style="
+                width:100%;margin-top:4px;padding:10px 12px;background:var(--color-bg-primary);
+                border:1px solid var(--color-border);border-radius:var(--radius-sm);
+                color:var(--color-text-primary);font-size:0.88rem;box-sizing:border-box;
+              ">
+            </label>
+            <div id="pw-saved-hint" style="display:none;margin-top:5px;font-size:0.72rem;color:var(--color-text-muted);
+              display:none;align-items:center;gap:4px;">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" style="flex-shrink:0;">
+                <rect x="3" y="7" width="10" height="7" rx="1.5" stroke="#94a3b8" stroke-width="1.3" fill="none"/>
+                <path d="M5.5 7V5a2.5 2.5 0 015 0v2" stroke="#94a3b8" stroke-width="1.3" fill="none"/>
+              </svg>
+              <span>Password will be loaded from saved connection file</span>
+            </div>
+          </div>
+
+          <!-- Key-pair field (hidden by default) -->
+          <div id="kp-section" style="display:none;">
+            <label style="font-size:0.78rem;color:var(--color-text-muted);font-weight:500;">Private Key (PEM)
+              <textarea name="private_key" id="conn-private-key" rows="4" placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----" style="
+                width:100%;margin-top:4px;padding:10px 12px;background:var(--color-bg-primary);
+                border:1px solid var(--color-border);border-radius:var(--radius-sm);
+                color:var(--color-text-primary);font-size:0.78rem;font-family:'SF Mono',Monaco,Menlo,monospace;
+                box-sizing:border-box;resize:vertical;line-height:1.5;
+              "></textarea>
+            </label>
+            <div style="margin-top:6px;">
+              <label style="font-size:0.72rem;color:var(--color-text-muted);font-weight:500;display:flex;align-items:center;gap:6px;">
+                Or upload <code style="font-size:0.72rem;">.p8</code> / <code style="font-size:0.72rem;">.pem</code> file
+                <input type="file" id="conn-key-file" accept=".p8,.pem" style="font-size:0.75rem;color:var(--color-text-muted);max-width:220px;"
+                  onchange="handleKeyFileUpload(this)">
+              </label>
+            </div>
+          </div>
+
+          <!-- Session Context section -->
+          <div class="conn-section-label" style="margin-top:2px;">Session Context</div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
+            <label style="font-size:0.78rem;color:var(--color-text-muted);font-weight:500;">Role
+              <input name="role" id="conn-role" value="" placeholder="User default" style="
+                width:100%;margin-top:4px;padding:10px 12px;background:var(--color-bg-primary);
+                border:1px solid var(--color-border);border-radius:var(--radius-sm);
+                color:var(--color-text-primary);font-size:0.82rem;box-sizing:border-box;
+              ">
+            </label>
+            <label style="font-size:0.78rem;color:var(--color-text-muted);font-weight:500;">Warehouse
+              <input name="warehouse" id="conn-warehouse" value="" placeholder="User default" style="
+                width:100%;margin-top:4px;padding:10px 12px;background:var(--color-bg-primary);
+                border:1px solid var(--color-border);border-radius:var(--radius-sm);
+                color:var(--color-text-primary);font-size:0.82rem;box-sizing:border-box;
+              ">
+            </label>
+            <label style="font-size:0.78rem;color:var(--color-text-muted);font-weight:500;">Database
+              <input name="database" id="conn-database" value="FLUX_DB" placeholder="FLUX_DB" style="
+                width:100%;margin-top:4px;padding:10px 12px;background:var(--color-bg-primary);
+                border:1px solid var(--color-border);border-radius:var(--radius-sm);
+                color:var(--color-text-primary);font-size:0.82rem;box-sizing:border-box;
+              ">
+            </label>
+          </div>
+
+          <!-- Feedback area -->
+          <div id="conn-error" style="display:none;color:#f87171;font-size:0.8rem;padding:10px 12px;
+            background:rgba(248,113,113,0.06);border:1px solid rgba(248,113,113,0.15);
+            border-radius:var(--radius-sm);animation:connFadeIn 0.2s ease-out;"></div>
+          <div id="conn-success" style="display:none;animation:connFadeIn 0.2s ease-out;"></div>
+
+          <!-- Buttons -->
+          <div style="display:flex;gap:10px;margin-top:4px;">
+            <button type="button" id="test-btn" onclick="testConnection()" style="
+              padding:10px 20px;background:transparent;color:var(--color-text-secondary);font-weight:500;
+              font-size:0.85rem;border:1px solid var(--color-border);border-radius:var(--radius-sm);cursor:pointer;
+              transition:all 0.15s;flex-shrink:0;
+            " onmouseover="this.style.borderColor='var(--color-accent)';this.style.color='var(--color-accent)'"
+              onmouseout="this.style.borderColor='var(--color-border)';this.style.color='var(--color-text-secondary)'">
+              Test
+            </button>
+            <button type="submit" id="conn-btn" style="
+              flex:1;padding:11px 20px;background:var(--color-accent);color:#0f172a;font-weight:600;
+              font-size:0.95rem;border:none;border-radius:var(--radius-sm);cursor:pointer;
+              transition:all 0.15s;letter-spacing:0.01em;
+            " onmouseover="this.style.background='#7dd3fc'" onmouseout="this.style.background='var(--color-accent)'">
+              Connect
+            </button>
+          </div>
+        </form>
+
+        </div>
+      </div>
+    </div>
+
+    <script>
+    // ── Auth mode toggle ───────────────────────────────────────────
+    function setAuthMode(mode) {
+        document.getElementById('conn-auth-mode').value = mode;
+        const pwBtn = document.getElementById('auth-pw-btn');
+        const kpBtn = document.getElementById('auth-kp-btn');
+        const pwSec = document.getElementById('pw-section');
+        const kpSec = document.getElementById('kp-section');
+        if (mode === 'keypair') {
+            kpBtn.style.background = '#38bdf8'; kpBtn.style.color = '#0f172a';
+            pwBtn.style.background = 'var(--color-bg-tertiary)'; pwBtn.style.color = 'var(--color-text-muted)';
+            kpSec.style.display = ''; pwSec.style.display = 'none';
+        } else {
+            pwBtn.style.background = '#38bdf8'; pwBtn.style.color = '#0f172a';
+            kpBtn.style.background = 'var(--color-bg-tertiary)'; kpBtn.style.color = 'var(--color-text-muted)';
+            pwSec.style.display = ''; kpSec.style.display = 'none';
+        }
+    }
+
+    // ── Key file upload handler ──────────────────────────────────────
+    function handleKeyFileUpload(input) {
+        const file = input.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = e => {
+            document.getElementById('conn-private-key').value = e.target.result;
+        };
+        reader.readAsText(file);
+    }
+
+    // ── Load saved connections into dropdown ────────────────────────
+    let _savedConns = [];
+    (async function loadConnections() {
+        try {
+            const resp = await fetch('/api/connections');
+            const data = await resp.json();
+            _savedConns = data.connections || [];
+            const sel = document.getElementById('conn-saved');
+            if (!_savedConns.length) {
+                document.getElementById('conn-saved-section').style.display = 'none';
+                return;
+            }
+            _savedConns.forEach(c => {
+                const opt = document.createElement('option');
+                opt.value = c.name;
+                opt.textContent = c.name + '  \u2022  ' + c.account + ' / ' + c.user;
+                sel.appendChild(opt);
+            });
+        } catch(e) {
+            document.getElementById('conn-saved-section').style.display = 'none';
+        }
+    })();
+
+    function loadSavedConnection(name) {
+        document.getElementById('conn-name-hidden').value = name;
+        const hintEl = document.getElementById('pw-saved-hint');
+        const errEl = document.getElementById('conn-error');
+        const okEl = document.getElementById('conn-success');
+        errEl.style.display = 'none';
+        okEl.style.display = 'none';
+        if (!name) {
+            // Reset all fields for manual entry
+            document.getElementById('conn-account').value = '';
+            document.getElementById('conn-user').value = '';
+            document.getElementById('conn-role').value = '';
+            document.getElementById('conn-warehouse').value = '';
+            document.getElementById('conn-database').value = 'FLUX_DB';
+            document.getElementById('conn-password').value = '';
+            document.getElementById('conn-password').placeholder = '';
+            hintEl.style.display = 'none';
+            return;
+        }
+        const c = _savedConns.find(x => x.name === name);
+        if (!c) return;
+        document.getElementById('conn-account').value = c.account || '';
+        document.getElementById('conn-user').value = c.user || '';
+        document.getElementById('conn-role').value = c.role || '';
+        document.getElementById('conn-warehouse').value = c.warehouse || '';
+        document.getElementById('conn-database').value = c.database || 'FLUX_DB';
+        document.getElementById('conn-password').value = '';
+        document.getElementById('conn-password').placeholder = '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022';
+        hintEl.style.display = 'flex';
+
+        // Auto-resolve empty session context fields from Snowflake
+        const roleEl = document.getElementById('conn-role');
+        const whEl = document.getElementById('conn-warehouse');
+        const dbEl = document.getElementById('conn-database');
+        if (!c.role || !c.warehouse || !c.database) {
+            // Show resolving state on empty fields
+            if (!c.role) roleEl.placeholder = 'Resolving\u2026';
+            if (!c.warehouse) whEl.placeholder = 'Resolving\u2026';
+            fetch('/api/resolve-defaults/' + encodeURIComponent(name))
+                .then(r => r.json())
+                .then(d => {
+                    if (d.status === 'ok') {
+                        if (!roleEl.value && d.role) roleEl.value = d.role;
+                        if (!whEl.value && d.warehouse) whEl.value = d.warehouse;
+                        if (!dbEl.value && d.database) dbEl.value = d.database;
+                    }
+                    roleEl.placeholder = 'User default';
+                    whEl.placeholder = 'User default';
+                })
+                .catch(() => {
+                    roleEl.placeholder = 'User default';
+                    whEl.placeholder = 'User default';
+                });
+        }
+    }
+
+    // ── Test Connection ─────────────────────────────────────────────
+    async function testConnection() {
+        const btn = document.getElementById('test-btn');
+        const errEl = document.getElementById('conn-error');
+        const okEl = document.getElementById('conn-success');
+        errEl.style.display = 'none';
+        okEl.style.display = 'none';
+        btn.innerHTML = '<span class="conn-spinner"></span>Testing\u2026';
+        btn.disabled = true;
+        btn.style.opacity = '0.7';
+        try {
+            const form = document.getElementById('conn-form');
+            const resp = await fetch('/api/test-connection', { method: 'POST', body: new FormData(form) });
+            const data = await resp.json();
+            if (data.status === 'ok') {
+                const d = data.details || {};
+                // Backfill empty fields with what Snowflake actually resolved
+                const roleEl = document.getElementById('conn-role');
+                const whEl = document.getElementById('conn-warehouse');
+                const dbEl = document.getElementById('conn-database');
+                if (!roleEl.value && d.role) roleEl.value = d.role;
+                if (!whEl.value && d.warehouse) whEl.value = d.warehouse;
+                if (!dbEl.value && d.database) dbEl.value = d.database;
+                // Show resolved session context
+                const ctx = [d.role, d.warehouse, d.database].filter(Boolean).join(' / ');
+                const isKP = d.auth_mode === 'keypair';
+                const authBadge = isKP
+                    ? '<span style="display:inline-block;padding:1px 7px;border-radius:4px;font-size:0.68rem;font-weight:600;background:rgba(74,222,128,0.12);color:#4ade80;">Key-Pair &#x2713; HP Ready</span>'
+                    : '<span style="display:inline-block;padding:1px 7px;border-radius:4px;font-size:0.68rem;font-weight:600;background:rgba(245,158,11,0.12);color:#fbbf24;">Password &#x2014; SQL INSERT only</span>';
+                okEl.innerHTML = '<div style="padding:10px 12px;background:rgba(74,222,128,0.06);border:1px solid rgba(74,222,128,0.15);border-radius:var(--radius-sm);">'
+                    + '<div style="display:flex;align-items:center;gap:6px;color:#4ade80;font-size:0.82rem;font-weight:600;">'
+                    + '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" stroke="#4ade80" stroke-width="1.5"/><path d="M5 8l2 2 4-4" stroke="#4ade80" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+                    + ' ' + data.message + '</div>'
+                    + '<div style="margin-top:6px;display:flex;align-items:center;gap:8px;font-size:0.75rem;color:var(--color-text-muted);letter-spacing:0.01em;">'
+                    + d.user + ' @ ' + d.account + (ctx ? ' &nbsp;&middot;&nbsp; ' + ctx : '')
+                    + ' &nbsp;' + authBadge
+                    + '</div></div>';
+                okEl.style.display = 'block';
+            } else {
+                errEl.textContent = data.message || 'Test failed';
+                errEl.style.display = 'block';
+            }
+        } catch (err) {
+            errEl.textContent = 'Network error: ' + err.message;
+            errEl.style.display = 'block';
+        } finally {
+            btn.textContent = 'Test';
+            btn.disabled = false;
+            btn.style.opacity = '1';
+        }
+    }
+
+    // ── Submit ──────────────────────────────────────────────────────
+    async function submitConnect(e) {
+        e.preventDefault();
+        const btn = document.getElementById('conn-btn');
+        const errEl = document.getElementById('conn-error');
+        const okEl = document.getElementById('conn-success');
+        errEl.style.display = 'none';
+        okEl.style.display = 'none';
+        btn.innerHTML = '<span class="conn-spinner"></span>Connecting\u2026';
+        btn.disabled = true;
+        btn.style.opacity = '0.7';
+        try {
+            const form = document.getElementById('conn-form');
+            const resp = await fetch('/api/connect', { method: 'POST', body: new FormData(form) });
+            const data = await resp.json();
+            if (data.status === 'ok') {
+                document.getElementById('conn-overlay').style.display = 'none';
+                window.location.reload();
+            } else {
+                errEl.textContent = data.message || 'Connection failed';
+                errEl.style.display = 'block';
+            }
+        } catch (err) {
+            errEl.textContent = 'Network error: ' + err.message;
+            errEl.style.display = 'block';
+        } finally {
+            btn.textContent = 'Connect';
+            btn.disabled = false;
+            btn.style.opacity = '1';
+        }
+    }
+    </script>
     """
 
 
@@ -3084,6 +4392,298 @@ async def home():
 @app.get("/health")
 async def health():
     return {"status": "healthy", "connected": snowflake_session is not None}
+
+
+# ── Connection Management (local dev) ──────────────────────────────────────
+
+# Store user-provided connection params for reconnection
+_connection_params: Dict[str, str] = {}
+
+
+@app.get("/api/connection-status")
+async def connection_status():
+    """Return current connection state for frontend gate."""
+    if snowflake_session is not None:
+        try:
+            row = snowflake_session.sql(
+                "SELECT CURRENT_ACCOUNT(), CURRENT_USER(), CURRENT_DATABASE(), "
+                "CURRENT_ROLE(), CURRENT_WAREHOUSE(), CURRENT_SCHEMA()"
+            ).collect()[0]
+            return {
+                "connected": True,
+                "account": str(row[0]),
+                "user": str(row[1]),
+                "database": str(row[2]),
+                "role": str(row[3]),
+                "warehouse": str(row[4]),
+                "schema": str(row[5]),
+                "mode": "spcs" if os.path.isfile('/snowflake/session/token') else "local",
+                "auth_mode": _connection_params.get('auth_mode', 'password'),
+            }
+        except Exception:
+            pass
+    return {"connected": False, "mode": "disconnected"}
+
+
+@app.get("/api/connections")
+async def api_connections():
+    """Read saved connections from ~/.snowflake/connections.toml for the dropdown."""
+    try:
+        import tomllib
+    except ImportError:
+        import tomli as tomllib  # Python < 3.11
+    toml_path = os.path.expanduser("~/.snowflake/connections.toml")
+    if not os.path.isfile(toml_path):
+        # Try legacy path
+        toml_path = os.path.expanduser("~/.snowflake/config.toml")
+    if not os.path.isfile(toml_path):
+        return JSONResponse({"connections": []})
+    try:
+        with open(toml_path, "rb") as f:
+            cfg = tomllib.load(f)
+        conns = []
+        connections_section = cfg.get("connections", cfg)
+        for name, params in connections_section.items():
+            if not isinstance(params, dict):
+                continue
+            conns.append({
+                "name": name,
+                "account": params.get("account", ""),
+                "user": params.get("user", ""),
+                "role": params.get("role", ""),
+                "warehouse": params.get("warehouse", ""),
+                "database": params.get("database", ""),
+                "authenticator": params.get("authenticator", ""),
+            })
+        return JSONResponse({"connections": conns})
+    except Exception as e:
+        logger.warning(f"Failed to read connections.toml: {e}")
+        return JSONResponse({"connections": []})
+
+
+def _resolve_connection_params(account, user, password, private_key, auth_mode, role, warehouse, database, connection_name):
+    """Resolve and validate connection params, merging saved connection if specified.
+    Returns (creds_dict, error_message). error_message is None on success.
+    
+    Empty role/warehouse are omitted from creds so Snowflake uses the user's defaults.
+    Database defaults to FLUX_DB since the app requires it.
+    """
+    if connection_name:
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib
+        toml_path = os.path.expanduser("~/.snowflake/connections.toml")
+        if not os.path.isfile(toml_path):
+            toml_path = os.path.expanduser("~/.snowflake/config.toml")
+        if os.path.isfile(toml_path):
+            with open(toml_path, "rb") as f:
+                cfg = tomllib.load(f)
+            conn_cfg = cfg.get("connections", cfg).get(connection_name, {})
+            # Fill in any blanks from the saved connection
+            if not account:
+                account = conn_cfg.get("account", "")
+            if not user:
+                user = conn_cfg.get("user", "")
+            if not password and not private_key:
+                password = conn_cfg.get("password", "")
+            if not role:
+                role = conn_cfg.get("role", "")
+            if not warehouse:
+                warehouse = conn_cfg.get("warehouse", "")
+            if not database:
+                database = conn_cfg.get("database", "")
+
+    if not account or not user:
+        return None, "Account and user are required"
+    if auth_mode == "password" and not password:
+        return None, "Password is required"
+    if auth_mode == "keypair" and not private_key:
+        return None, "Private key PEM is required"
+
+    # Build creds — omit empty role/warehouse so Snowflake uses user defaults
+    if auth_mode == "keypair":
+        from cryptography.hazmat.primitives import serialization
+        pem_bytes = private_key.strip().encode("utf-8")
+        p_key = serialization.load_pem_private_key(pem_bytes, password=None)
+        pkb = p_key.private_bytes(
+            encoding=serialization.Encoding.DER,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        creds = {'account': account, 'user': user, 'private_key': pkb}
+    else:
+        creds = {'account': account, 'user': user, 'password': password}
+
+    if role:
+        creds['role'] = role
+    if warehouse:
+        creds['warehouse'] = warehouse
+    # Database defaults to FLUX_DB (required by the app), schema always PRODUCTION
+    creds['database'] = database or 'FLUX_DB'
+    creds['schema'] = 'PRODUCTION'
+
+    return creds, None
+
+
+def _activate_warehouse(session, preferred_wh: str = "") -> str | None:
+    """Ensure a warehouse is active on *session*.
+
+    Tries *preferred_wh* first. If it doesn't exist / no access, falls back to
+    the first warehouse the user can see.  Returns the active warehouse name,
+    or None if nothing could be activated.
+    """
+    if preferred_wh:
+        try:
+            session.sql(f"USE WAREHOUSE {preferred_wh}").collect()
+            return preferred_wh
+        except Exception:
+            logger.warning(f"Warehouse '{preferred_wh}' unavailable, trying fallback…")
+
+    # Fallback: pick the first warehouse the user has access to
+    try:
+        wh_rows = session.sql("SHOW WAREHOUSES").collect()
+        if wh_rows:
+            fallback = str(wh_rows[0][0])
+            session.sql(f"USE WAREHOUSE {fallback}").collect()
+            logger.info(f"Activated fallback warehouse: {fallback}")
+            return fallback
+    except Exception:
+        pass
+    return None
+
+
+@app.post("/api/test-connection")
+async def api_test_connection(
+    account: str = Form(""),
+    user: str = Form(""),
+    password: str = Form(""),
+    private_key: str = Form(""),
+    auth_mode: str = Form("password"),
+    role: str = Form(""),
+    warehouse: str = Form(""),
+    database: str = Form(""),
+    connection_name: str = Form(""),
+):
+    """Test Snowflake connection without replacing the active session."""
+    try:
+        creds, err = _resolve_connection_params(
+            account, user, password, private_key, auth_mode, role, warehouse, database, connection_name)
+        if err:
+            return JSONResponse({"status": "error", "message": err})
+        test_session = Session.builder.configs(creds).create()
+        _activate_warehouse(test_session, creds.get('warehouse', ''))
+        row = test_session.sql(
+            "SELECT CURRENT_VERSION(), CURRENT_ACCOUNT(), CURRENT_USER(), CURRENT_ROLE(), CURRENT_WAREHOUSE(), CURRENT_DATABASE()"
+        ).collect()[0]
+        test_session.close()
+        return JSONResponse({
+            "status": "ok",
+            "message": f"Connection successful (Snowflake {row[0]})",
+            "details": {
+                "account": str(row[1]), "user": str(row[2]), "role": str(row[3]),
+                "warehouse": str(row[4]) if row[4] else "", "database": str(row[5]) if row[5] else "",
+                "auth_mode": auth_mode,
+            },
+        })
+    except Exception as e:
+        logger.warning(f"Test connection failed: {e}")
+        return JSONResponse({"status": "error", "message": str(e)[:300]})
+
+
+@app.get("/api/resolve-defaults/{connection_name}")
+async def api_resolve_defaults(connection_name: str):
+    """Quick probe: connect using saved TOML creds and return the resolved role/warehouse/database."""
+    try:
+        creds, err = _resolve_connection_params("", "", "", "", "password", "", "", "", connection_name)
+        if err:
+            return JSONResponse({"status": "error"})
+        probe = Session.builder.configs(creds).create()
+        _activate_warehouse(probe, creds.get('warehouse', ''))
+        row = probe.sql(
+            "SELECT CURRENT_ROLE(), CURRENT_WAREHOUSE(), CURRENT_DATABASE()"
+        ).collect()[0]
+        probe.close()
+        return JSONResponse({
+            "status": "ok",
+            "role": str(row[0]) if row[0] else "",
+            "warehouse": str(row[1]) if row[1] else "",
+            "database": str(row[2]) if row[2] else "",
+        })
+    except Exception:
+        return JSONResponse({"status": "error"})
+
+
+@app.post("/api/connect")
+async def api_connect(
+    account: str = Form(""),
+    user: str = Form(""),
+    password: str = Form(""),
+    private_key: str = Form(""),
+    auth_mode: str = Form("password"),
+    role: str = Form(""),
+    warehouse: str = Form(""),
+    database: str = Form(""),
+    connection_name: str = Form(""),
+):
+    """Connect to Snowflake from the UI (local dev mode). Supports password and key-pair auth."""
+    global snowflake_session
+    try:
+        creds, err = _resolve_connection_params(
+            account, user, password, private_key, auth_mode, role, warehouse, database, connection_name)
+        if err:
+            return JSONResponse({"status": "error", "message": err})
+
+        new_session = Session.builder.configs(creds).create()
+        new_session.sql("SELECT CURRENT_VERSION()").collect()
+
+        # Explicitly activate warehouse — Snowpark sets the name but doesn't
+        # always activate a suspended warehouse, causing "No active warehouse" errors.
+        wh = creds.get('warehouse', '')
+        active_wh = _activate_warehouse(new_session, wh)
+
+        if not active_wh:
+            new_session.close()
+            return JSONResponse({
+                "status": "error",
+                "message": "Connected to Snowflake but no warehouse is available. "
+                           + (f"The configured warehouse '{wh}' does not exist or you lack access. " if wh else "")
+                           + "Please specify a valid warehouse."
+            })
+
+        if snowflake_session:
+            try:
+                snowflake_session.close()
+            except Exception:
+                pass
+        snowflake_session = new_session
+
+        _connection_params.update({
+            'account': creds.get('account', ''), 'user': creds.get('user', ''),
+            'role': creds.get('role', ''), 'warehouse': creds.get('warehouse', ''),
+            'database': creds.get('database', ''), 'auth_mode': auth_mode,
+        })
+        _post_connect_setup()
+
+        logger.info(f"Connected via UI: account={creds['account']}, user={creds['user']}, auth={auth_mode}")
+        return JSONResponse({"status": "ok", "message": f"Connected to {creds['account']}"})
+    except Exception as e:
+        logger.exception("UI connection failed")
+        return JSONResponse({"status": "error", "message": str(e)[:300]})
+
+
+@app.post("/api/disconnect")
+async def api_disconnect():
+    """Close the active Snowflake session so the user can reconnect via the modal."""
+    global snowflake_session
+    if snowflake_session:
+        try:
+            snowflake_session.close()
+        except Exception:
+            pass
+        snowflake_session = None
+        logger.info("User disconnected from Snowflake via UI")
+    return JSONResponse({"status": "ok"})
 
 
 @app.get("/generate", response_class=HTMLResponse)
@@ -3161,6 +4761,30 @@ async def generate_page(
         </div>
         '''
     
+    # Build streaming architecture advisor cards
+    advisor_cards = ""
+    for src_name, adv in STREAMING_ADVISOR.items():
+        rec_flow = DATA_FLOWS.get(adv['recommended'], {})
+        alt_flow = DATA_FLOWS.get(adv['alt'], {})
+        openflow_badge = '<span style="display:inline-block;margin-top:4px;padding:1px 6px;border-radius:3px;font-size:0.62rem;font-weight:600;background:rgba(245,158,11,0.12);color:#f59e0b;">Openflow</span>' if adv.get('openflow_note') else ''
+        sources_html = ''.join(f'<div style="font-size:0.72rem;color:#94a3b8;">&bull; {s}</div>' for s in adv['sources'])
+        advisor_cards += f'''
+        <div style="padding:10px;background:#1e293b;border:1px solid #334155;border-radius:8px;cursor:pointer;transition:all 0.15s;"
+             onmouseenter="this.style.borderColor='rgba(99,102,241,0.5)'"
+             onmouseleave="this.style.borderColor='#334155'"
+             onclick="showAdvisor('{src_name}', '{adv['recommended']}', '{adv.get('alt','')}', this)">
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+                {get_material_icon(adv['icon'], '18px', '#a5b4fc')}
+                <span style="font-size:0.82rem;font-weight:600;color:#e2e8f0;">{src_name}</span>
+            </div>
+            {sources_html}
+            <div style="margin-top:6px;font-size:0.68rem;">
+                <span style="color:{rec_flow.get('color','#38bdf8')};">&rarr; {rec_flow.get('name','')}</span>
+            </div>
+            {openflow_badge}
+        </div>
+        '''
+
     service_area_options = ""
     for area_id, area in UTILITY_PROFILES.items():
         selected = "selected" if area_id == service_area else ""
@@ -3322,7 +4946,93 @@ async def generate_page(
             </script>
             '''
         
+        # Build advisor rationale JSON for client-side display
+        import json as _json
+        advisor_js_data = {}
+        for src_name, adv in STREAMING_ADVISOR.items():
+            rec_flow = DATA_FLOWS.get(adv['recommended'], {})
+            alt_flow = DATA_FLOWS.get(adv['alt'], {})
+            advisor_js_data[src_name] = {
+                'rationale': adv['rationale'],
+                'recommended': adv['recommended'],
+                'recommended_name': rec_flow.get('name', ''),
+                'recommended_color': rec_flow.get('color', '#38bdf8'),
+                'alt': adv.get('alt', ''),
+                'alt_name': alt_flow.get('name', ''),
+                'alt_color': alt_flow.get('color', '#94a3b8'),
+            }
+        
+        advisor_script = f'''
+        <script>
+        const ADVISOR_DATA = {_json.dumps(advisor_js_data)};
+        function showAdvisor(srcName, recFlow, altFlow, el) {{
+            const info = ADVISOR_DATA[srcName];
+            if (!info) return;
+            const detail = document.getElementById('advisor_detail');
+            const rationale = document.getElementById('advisor_rationale');
+            const actions = document.getElementById('advisor_actions');
+            detail.style.display = '';
+            rationale.innerHTML = '<div style="font-weight:600;color:#a5b4fc;margin-bottom:6px;">' + srcName + ' &mdash; Recommendation</div>' + info.rationale;
+            let btns = '<button style="padding:6px 14px;border-radius:6px;border:1px solid ' + info.recommended_color + ';background:' + info.recommended_color + '18;color:' + info.recommended_color + ';font-size:0.78rem;font-weight:600;cursor:pointer;" onclick="selectDataFlow(\\'' + recFlow + '\\')">&rarr; Use ' + info.recommended_name + '</button>';
+            if (altFlow) {{
+                btns += '<button style="padding:6px 14px;border-radius:6px;border:1px solid #475569;background:#1e293b;color:#94a3b8;font-size:0.78rem;font-weight:500;cursor:pointer;" onclick="selectDataFlow(\\'' + altFlow + '\\')">' + info.alt_name + ' (alternative)</button>';
+            }}
+            actions.innerHTML = btns;
+        }}
+        function selectDataFlow(flowId) {{
+            const params = new URLSearchParams(window.location.search);
+            params.set('data_flow', flowId);
+            window.location.search = params.toString();
+        }}
+        </script>
+        '''
+
+        hp_auth_warning = ''
+        _is_spcs = os.path.isfile('/snowflake/session/token')
+        if not _is_spcs and _connection_params.get('auth_mode') != 'keypair' and mode == 'streaming':
+            _warn_icon = get_material_icon('warning', '18px', '#f59e0b')
+            hp_auth_warning = (
+                '<div style="margin-bottom:14px;padding:10px 14px;background:rgba(245,158,11,0.07);'
+                'border:1px solid rgba(245,158,11,0.25);border-radius:8px;display:flex;align-items:flex-start;'
+                'gap:10px;font-size:0.82rem;color:#fbbf24;line-height:1.5;">'
+                + _warn_icon +
+                '<div><strong>Password auth detected.</strong> High-Performance Snowpipe Streaming requires '
+                'Key-Pair authentication. HP Streaming options will fall back to standard SQL INSERT — '
+                'not the native Snowpipe Streaming SDK. '
+                '<a href="javascript:void(0)" onclick="document.getElementById(\'conn-overlay\').style.display=\'flex\'" '
+                'style="color:#38bdf8;text-decoration:underline;cursor:pointer;">Reconnect with Key-Pair</a> '
+                'to enable HP mode.</div></div>'
+            )
+
+        pipe_icon = get_material_icon('verified', '14px', '#22c55e')
+        hp_pipe_section_html = ''
+        if mechanism == 'snowpipe_hp' and dest != 'stage':
+            hp_pipe_section_html = (
+                '<div class="section-header"><span class="section-num">6</span>Streaming PIPE</div>'
+                '<p style="color: #94a3b8; font-size: 0.9375rem; margin-bottom: 16px;">'
+                'HP Streaming requires a PIPE object with <code style="color: #f59e0b; background: rgba(245,158,11,0.1); padding: 2px 6px; border-radius: 4px;">DATA_SOURCE(TYPE =&gt; \'STREAMING\')</code>. '
+                'Verify or create the pipe below.</p>'
+                '<div style="display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: end; margin-bottom: 16px;">'
+                '<div class="form-group" style="margin-bottom:0;">'
+                '<label class="form-label">PIPE Name</label>'
+                '<input type="text" id="hp_pipe_name" value="AMI_STREAMING_PIPE" placeholder="PIPE name" '
+                'oninput="document.getElementById(\'form_pipe_name\').value = this.value;">'
+                '</div>'
+                '<div style="display:flex;align-items:center;gap:8px;">'
+                '<button type="button" class="btn-secondary" onclick="checkOrCreateHpPipe()" '
+                'style="font-size: 0.85rem; padding: 8px 16px; white-space: nowrap;" id="hp_pipe_btn">'
+                + pipe_icon + ' Check / Create PIPE</button>'
+                '<span id="hp_pipe_status" style="font-size: 0.75rem; font-weight: 500;"></span>'
+                '</div>'
+                '</div>'
+                '<span id="hp_pipe_msg" style="font-size: 0.82rem; color: #94a3b8; display:block; margin-bottom: 16px; overflow-wrap: break-word; word-break: break-word;"></span>'
+                '<div class="divider"></div>'
+            )
+
         config_section = f'''
+        <style>
+            .advisor-details[open] > .advisor-summary {{ border-radius: 10px 10px 0 0; }}
+        </style>
         <div class="section-header">
             <span class="section-num">3</span>
             Data Flow
@@ -3330,11 +5040,34 @@ async def generate_page(
         <p style="color: #94a3b8; font-size: 0.9375rem; margin-bottom: 16px;">
             Choose the complete data pipeline. Each option defines HOW data flows and WHERE it lands.
         </p>
+        
+        <!-- Streaming Architecture Advisor - BEFORE data flow cards to guide selection -->
+        <details class="advisor-details" style="margin-bottom: 20px;">
+            <summary class="advisor-summary" style="cursor: pointer; display: flex; align-items: center; gap: 8px; padding: 12px 16px; background: rgba(99,102,241,0.08); border: 1px solid rgba(99,102,241,0.25); border-radius: 10px; font-size: 0.88rem; font-weight: 600; color: #a5b4fc; list-style: none;">
+                {get_material_icon('assistant_navigation', '18px', '#a5b4fc')} Not sure which path? Let me help you choose
+                <span style="margin-left: auto; font-size: 0.72rem; color: #94a3b8; font-weight: 400;">Click to expand</span>
+            </summary>
+            <div style="padding: 16px; background: #0f172a; border: 1px solid rgba(99,102,241,0.15); border-top: none; border-radius: 0 0 10px 10px;">
+                <p style="color: #94a3b8; font-size: 0.82rem; margin-bottom: 14px;">
+                    Select your source system type below. The advisor recommends the optimal data flow and explains why.
+                    Sources supported by <b style="color: #f59e0b;">Snowflake Openflow</b> (native NiFi-based connectors) are flagged.
+                </p>
+                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;">
+                    {advisor_cards}
+                </div>
+                <div id="advisor_detail" style="display: none; margin-top: 14px; padding: 14px; background: rgba(99,102,241,0.04); border: 1px solid rgba(99,102,241,0.15); border-radius: 8px;">
+                    <div id="advisor_rationale" style="color: #cbd5e1; font-size: 0.82rem; line-height: 1.6;"></div>
+                    <div style="margin-top: 10px; display: flex; gap: 8px;" id="advisor_actions"></div>
+                </div>
+            </div>
+        </details>
+        
+        {hp_auth_warning}
         <div class="mechanism-grid">
             {data_flow_cards}
         </div>
         
-        <div class="section-header">
+        <div class="section-header" style="margin-top: 24px;">
             <span class="section-num">4</span>
             Configure Fleet Size & Data Source
         </div>
@@ -3423,6 +5156,165 @@ async def generate_page(
         
         <div class="section-header">
             <span class="section-num">5</span>
+            Snowflake Target
+        </div>
+        <p style="color: #94a3b8; font-size: 0.9375rem; margin-bottom: 16px;">
+            Choose the destination database, schema, and table for streaming data.
+        </p>
+        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 16px;">
+            <div class="form-group">
+                <label class="form-label">Database</label>
+                <select id="stream_sf_database" onchange="loadStreamSchemas(this.value)" style="width:100%;">
+                    <option value="">Loading databases...</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Schema</label>
+                <select id="stream_sf_schema" onchange="loadStreamTables()" style="width:100%;">
+                    <option value="">Select database first</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="form-label">Table</label>
+                <select id="stream_table" style="width:100%;" onchange="syncStreamFields()">
+                    <option value="">Select schema first</option>
+                </select>
+                <input type="text" id="stream_new_table" placeholder="Enter new table name" style="display: none; margin-top: 6px;" oninput="syncStreamFields()">
+                <label class="checkbox-row" style="margin-top: var(--space-sm); cursor: pointer;">
+                    <input type="checkbox" id="stream_create_new" onchange="toggleStreamNewTable()">
+                    <span class="checkbox-label">Create new table</span>
+                </label>
+            </div>
+        </div>
+        
+        <div class="divider"></div>
+        
+        {hp_pipe_section_html}
+        
+        <div class="section-header">
+            <span class="section-num">{'7' if mechanism == 'snowpipe_hp' and dest != 'stage' else '6'}</span>
+            Data Source
+        </div>
+        <p style="color: #94a3b8; font-size: 0.9375rem; margin-bottom: 16px;">
+            Select where streaming data originates from.
+        </p>
+        <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px;">
+            <button type="button" class="btn-secondary streaming-src-btn active" data-src="test"
+                    onclick="setStreamSource('test')" style="font-size: 0.85rem; padding: 8px 16px;">
+                {get_material_icon('science', '14px')} Test Data
+            </button>
+            <button type="button" class="btn-secondary streaming-src-btn" data-src="eventhub"
+                    onclick="setStreamSource('eventhub')" style="font-size: 0.85rem; padding: 8px 16px;">
+                {get_material_icon('cloud_queue', '14px')} Azure EventHub
+            </button>
+            <button type="button" class="btn-secondary streaming-src-btn" data-src="pubsub"
+                    onclick="setStreamSource('pubsub')" style="font-size: 0.85rem; padding: 8px 16px;">
+                {get_material_icon('cloud', '14px')} Google PubSub
+            </button>
+        </div>
+        <!-- EventHub fields -->
+        <div id="eventhub_fields" style="display:none; margin-bottom: 12px;">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                <div class="form-group">
+                    <label class="form-label">Connection String</label>
+                    <input type="text" id="eh_conn_str" placeholder="Endpoint=sb://..." oninput="syncStreamFields()">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">EventHub Name</label>
+                    <input type="text" id="eh_name" placeholder="EventHub Name" oninput="syncStreamFields()">
+                </div>
+            </div>
+            <div class="form-group" style="max-width: 50%;">
+                <label class="form-label">Consumer Group</label>
+                <input type="text" id="eh_consumer_group" value="$Default" placeholder="Consumer Group" oninput="syncStreamFields()">
+            </div>
+        </div>
+        <!-- PubSub fields -->
+        <div id="pubsub_fields" style="display:none; margin-bottom: 12px;">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                <div class="form-group">
+                    <label class="form-label">GCP Project ID</label>
+                    <input type="text" id="ps_project" placeholder="GCP Project ID" oninput="syncStreamFields()">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Subscription Name</label>
+                    <input type="text" id="ps_subscription" placeholder="Subscription Name" oninput="syncStreamFields()">
+                </div>
+            </div>
+        </div>
+        
+        <!-- V1 vs V2 Comparison Toggle -->
+        <div id="compare_toggle_section" style="padding: 10px 14px; background: rgba(168,85,247,0.08); border: 1px solid rgba(168,85,247,0.2); border-radius: 8px; display:none; margin-bottom: 16px;">
+            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 0.85rem; color: #e2e8f0;">
+                <input type="checkbox" id="compare_mode_cb" value="1" onchange="syncStreamFields()">
+                <b>V1 vs V2 Comparison</b> &mdash; Run HP SDK (V2) and SQL INSERT (V1) simultaneously to compare throughput
+            </label>
+        </div>
+        
+        <script>
+        // Sync main-column inputs to sidebar form hidden fields
+        function syncStreamFields() {{
+            const f = id => document.getElementById(id);
+            // Table
+            const createNew = f('stream_create_new')?.checked;
+            const tbl = createNew ? (f('stream_new_table')?.value || '') : (f('stream_table')?.value || '');
+            if (f('form_table')) f('form_table').value = tbl;
+            if (f('form_new_table')) f('form_new_table').value = createNew ? (f('stream_new_table')?.value || '') : '';
+            // Source fields
+            if (f('form_eh_conn_str')) f('form_eh_conn_str').value = f('eh_conn_str')?.value || '';
+            if (f('form_eh_name')) f('form_eh_name').value = f('eh_name')?.value || '';
+            if (f('form_eh_consumer_group')) f('form_eh_consumer_group').value = f('eh_consumer_group')?.value || '$Default';
+            if (f('form_ps_project')) f('form_ps_project').value = f('ps_project')?.value || '';
+            if (f('form_ps_subscription')) f('form_ps_subscription').value = f('ps_subscription')?.value || '';
+            // Compare mode
+            if (f('form_compare_mode')) f('form_compare_mode').value = f('compare_mode_cb')?.checked ? '1' : '';
+            // Update sidebar display
+            const targetDisplay = f('sidebar_target_display');
+            if (targetDisplay) {{
+                const tableName = tbl ? tbl.split('.').pop() : 'Not selected';
+                targetDisplay.textContent = tableName;
+                targetDisplay.style.color = tbl ? '#38bdf8' : '#64748b';
+            }}
+            const sourceDisplay = f('sidebar_source_display');
+            if (sourceDisplay) {{
+                const srcVal = f('form_stream_source')?.value || 'test';
+                const labels = {{ test: 'Test Data', eventhub: 'Azure EventHub', pubsub: 'Google PubSub' }};
+                sourceDisplay.textContent = labels[srcVal] || srcVal;
+            }}
+        }}
+        function setStreamSource(src) {{
+            document.getElementById('form_stream_source').value = src;
+            document.querySelectorAll('.streaming-src-btn').forEach(b => {{
+                b.classList.toggle('active', b.dataset.src === src);
+                if (b.dataset.src === src) {{
+                    b.style.background = 'rgba(56,189,248,0.15)';
+                    b.style.color = '#38bdf8';
+                    b.style.borderColor = '#38bdf8';
+                }} else {{
+                    b.style.background = '';
+                    b.style.color = '';
+                    b.style.borderColor = '';
+                }}
+            }});
+            document.getElementById('eventhub_fields').style.display = src === 'eventhub' ? '' : 'none';
+            document.getElementById('pubsub_fields').style.display = src === 'pubsub' ? '' : 'none';
+            const cmpEl = document.getElementById('compare_toggle_section');
+            if (cmpEl) cmpEl.style.display = (src === 'test') ? '' : 'none';
+            syncStreamFields();
+        }}
+        (function() {{
+            const mechanism = '{mechanism}';
+            if (mechanism === 'snowpipe_hp') {{
+                const cmpEl = document.getElementById('compare_toggle_section');
+                if (cmpEl) cmpEl.style.display = '';
+            }}
+        }})();
+        </script>
+        
+        <div class="divider"></div>
+        
+        <div class="section-header">
+            <span class="section-num">{'8' if mechanism == 'snowpipe_hp' and dest != 'stage' else '7'}</span>
             Streaming Behavior & Data Format
         </div>
         <p style="color: #94a3b8; font-size: 0.9375rem; margin-bottom: 16px;">
@@ -3450,7 +5342,7 @@ async def generate_page(
             </div>
             <div class="form-group">
                 <label class="form-label">Data Format</label>
-                {'<select id="data_format" disabled style="background: rgba(14,165,233,0.1); border-color: #0ea5e9;"><option value="raw_ami" selected>Raw JSON (VARIANT)</option></select><div style="font-size: 0.8125rem; color: #0ea5e9; margin-top: 6px;">Stage Landing uses raw JSON format</div>' if dest == 'stage' else '<select id="data_format" onchange="syncFormFields()"><option value="standard" selected>Standard AMI (Structured)</option><option value="raw_ami">Raw AMI (with VARIANT)</option><option value="minimal">Minimal (Essential only)</option></select>'}
+                {'<select id="data_format" disabled style="background: rgba(14,165,233,0.1); border-color: #0ea5e9;"><option value="raw_ami" selected>Raw JSON (VARIANT)</option></select><div style="font-size: 0.8125rem; color: #0ea5e9; margin-top: 6px;">Stage Landing uses raw JSON format</div>' if dest == 'stage' else '<select id="data_format" onchange="syncFormFields()"><option value="standard" selected>Standard AMI (Structured)</option><option value="raw_ami">Raw AMI (with VARIANT)</option><option value="minimal">Minimal (Essential only)</option><optgroup label="Energy Solutions Marketplace"><option value="itron_grid_planning">Itron Grid Planning (8,760-hr)</option><option value="symphony_iris">SymphonyAI IRIS Foundry</option><option value="carto_spatial">CARTO Spatial Analytics</option><option value="siemens_edge">Siemens Industrial Edge</option></optgroup></select>'}
             </div>
         </div>
         
@@ -3465,7 +5357,7 @@ async def generate_page(
         
         <!-- Preview Section -->
         <div class="section-header">
-            <span class="section-num">6</span>
+            <span class="section-num">{'9' if mechanism == 'snowpipe_hp' and dest != 'stage' else '8'}</span>
             Preview Records
         </div>
         <p style="color: #94a3b8; font-size: 0.9375rem; margin-bottom: 16px;">
@@ -3782,6 +5674,7 @@ async def generate_page(
         </script>
         
         {sdk_limits_html}
+        {advisor_script}
         '''
         
         streaming_info = f'''
@@ -4116,47 +6009,35 @@ async def generate_page(
     flow_display = DATA_FLOWS.get(data_flow, DATA_FLOWS['streaming_insert'])
     
     preview_content = f'''
-    <div class="panel-title">{get_material_icon('preview', '20px')} Configuration Preview</div>
-    <div style="margin-bottom: 16px;">
-        <div style="color: #64748b; font-size: 0.85rem;">Selected Template</div>
-        <div style="color: #e2e8f0; font-size: 1.1rem; font-weight: 600;">{template}</div>
+    <div class="panel-title">{get_material_icon('play_circle', '20px')} Launch Streaming</div>
+    
+    <!-- Compact status summary -->
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; padding: 10px; background: rgba(15,23,42,0.5); border-radius: 8px;">
+        <div>
+            <div style="color: #64748b; font-size: 0.7rem;">Data Flow</div>
+            <div style="color: {flow_display['color']}; font-size: 0.85rem; font-weight: 600;">{flow_display['name']}</div>
+        </div>
+        <div>
+            <div style="color: #64748b; font-size: 0.7rem;">Fleet</div>
+            <div style="color: #e2e8f0; font-size: 0.85rem; font-weight: 600;" id="preview_fleet_size">{fleet_cfg['meters']:,}</div>
+        </div>
     </div>
-    <div style="margin-bottom: 16px;">
-        <div style="color: #64748b; font-size: 0.85rem;">Generation Mode</div>
-        <div style="color: #e2e8f0; font-size: 1.1rem; font-weight: 600;">{'Streaming' if mode == 'streaming' else 'Batch'}</div>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; padding: 10px; background: rgba(15,23,42,0.5); border-radius: 8px;">
+        <div>
+            <div style="color: #64748b; font-size: 0.7rem;">Target</div>
+            <div style="color: #38bdf8; font-size: 0.82rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" id="sidebar_target_display">Not selected</div>
+        </div>
+        <div>
+            <div style="color: #64748b; font-size: 0.7rem;">Source</div>
+            <div style="color: #a78bfa; font-size: 0.82rem; font-weight: 600;" id="sidebar_source_display">Test Data</div>
+        </div>
     </div>
-    <div style="margin-bottom: 16px;">
-        <div style="color: #64748b; font-size: 0.85rem;">Service Area</div>
-        <div style="color: #e2e8f0; font-size: 1.1rem; font-weight: 600;">{area_cfg['name']}</div>
-    </div>
+    <p style="color: #64748b; font-size: 0.78rem; margin-bottom: 12px; line-height: 1.4;">
+        Configure all steps in the main panel, then click Start Streaming to begin ingestion.
+    </p>
     '''
     
     if mode == "streaming":
-        preview_content += f'''
-        <div style="margin-bottom: 16px;">
-            <div style="color: #64748b; font-size: 0.85rem;">Data Flow</div>
-            <div style="color: {flow_display['color']}; font-size: 1.1rem; font-weight: 600;">{flow_display['name']}</div>
-            <div style="color: #64748b; font-size: 0.8rem;">Latency: {flow_display['latency']}</div>
-        </div>
-        <div style="margin-bottom: 16px;">
-            <div style="color: #64748b; font-size: 0.85rem;">Fleet Size</div>
-            <div style="color: #e2e8f0; font-size: 1.1rem; font-weight: 600;" id="preview_fleet_size">{fleet_cfg['meters']:,} meters</div>
-        </div>
-        <div style="margin-bottom: 16px;">
-            <div style="color: #64748b; font-size: 0.85rem;">Production Matching</div>
-            <div style="color: #22c55e; font-size: 0.9rem; font-weight: 600;" id="preview_production_status">Checking...</div>
-        </div>
-        '''
-        
-        if mechanism in ['snowpipe_classic', 'snowpipe_hp']:
-            preview_content += f'''
-            <div style="margin-bottom: 16px;">
-                <div style="color: #64748b; font-size: 0.85rem;">SDK Configuration</div>
-                <div style="color: #22c55e; font-size: 1rem; font-weight: 600;">{rows_per_sec:,} rows/sec</div>
-                <div style="color: #64748b; font-size: 0.8rem;">Batch: {batch_size_mb}MB | Lag: {max_client_lag}s</div>
-            </div>
-            '''
-        
         preview_content += f'''
         <form action="/api/stream" method="post" id="streaming_form">
             <input type="hidden" name="template" value="{template}">
@@ -4175,56 +6056,21 @@ async def generate_page(
             <input type="hidden" name="segment_filter" id="form_segment_filter" value="">
             <input type="hidden" name="data_format" id="form_data_format" value="{'raw_ami' if dest == 'stage' else 'standard'}">
             <input type="hidden" name="pipe_name" id="form_pipe_name" value="AMI_STREAMING_PIPE">
+            <!-- Mirror fields for main-column inputs (synced via JS) -->
+            <input type="hidden" name="table" id="form_table" value="">
+            <input type="hidden" name="new_table" id="form_new_table" value="">
+            <input type="hidden" name="stream_source" id="form_stream_source" value="test">
+            <input type="hidden" name="eh_conn_str" id="form_eh_conn_str" value="">
+            <input type="hidden" name="eh_name" id="form_eh_name" value="">
+            <input type="hidden" name="eh_consumer_group" id="form_eh_consumer_group" value="$Default">
+            <input type="hidden" name="ps_project" id="form_ps_project" value="">
+            <input type="hidden" name="ps_subscription" id="form_ps_subscription" value="">
+            <input type="hidden" name="compare_mode" id="form_compare_mode" value="">
             '''
         
-        # Only show the generic Snowflake target section for non-stage flows
-        # Stage landing flow has its own comprehensive target configuration (STEP 4: Bronze Table)
-        if dest != 'stage':
-            preview_content += f'''
-            <div class="target-section">
-                <div class="target-section-title">
-                    {get_material_icon('database', '16px', '#38bdf8')} Snowflake target
-                </div>
-                <select id="stream_sf_database" onchange="loadStreamSchemas(this.value)">
-                    <option value="">Loading databases...</option>
-                </select>
-                <select id="stream_sf_schema" onchange="loadStreamTables()">
-                    <option value="">Select database first</option>
-                </select>
-                <select name="table" id="stream_table">
-                    <option value="">Select schema first</option>
-                </select>
-                <input type="text" id="stream_new_table" name="new_table" placeholder="Enter new table name" style="display: none;">
-                <label class="checkbox-row" style="margin-top: var(--space-sm); cursor: pointer;">
-                    <input type="checkbox" id="stream_create_new" onchange="toggleStreamNewTable()">
-                    <span class="checkbox-label">Create new table</span>
-                </label>
-            </div>
-            '''
-        
-        # Add HP Streaming PIPE configuration section
+        # HP Streaming PIPE check script (used by main-column pipe section)
         if mechanism == 'snowpipe_hp' and dest != 'stage':
             preview_content += f'''
-            <div class="target-section" style="margin-top: 12px;">
-                <div class="target-section-title">
-                    {get_material_icon('plumbing', '16px', '#f59e0b')} Streaming PIPE
-                    <span id="hp_pipe_status" style="margin-left: 8px; font-size: 0.75rem; font-weight: 500;"></span>
-                </div>
-                <div style="color: #94a3b8; font-size: 0.8rem; margin-bottom: 8px;">
-                    HP Streaming requires a PIPE object with <code style="color: #f59e0b; background: rgba(245,158,11,0.1); padding: 1px 4px; border-radius: 3px;">DATA_SOURCE(TYPE =&gt; 'STREAMING')</code>
-                </div>
-                <input type="text" id="hp_pipe_name" value="AMI_STREAMING_PIPE" placeholder="PIPE name"
-                       oninput="document.getElementById('form_pipe_name').value = this.value;"
-                       style="margin-bottom: 8px;">
-                <div style="display: flex; gap: 8px; align-items: center;">
-                    <button type="button" class="btn-secondary" onclick="checkOrCreateHpPipe()" 
-                            style="font-size: 0.8rem; padding: 6px 12px; white-space: nowrap;"
-                            id="hp_pipe_btn">
-                        {get_material_icon('verified', '14px', '#22c55e')} Check / Create PIPE
-                    </button>
-                    <span id="hp_pipe_msg" style="font-size: 0.8rem; color: #94a3b8;"></span>
-                </div>
-            </div>
             <script>
             async function checkOrCreateHpPipe() {{
                 const pipeName = document.getElementById('hp_pipe_name').value.trim();
@@ -4242,9 +6088,13 @@ async def generate_page(
                 const dbEl = document.getElementById('stream_sf_database');
                 const schemaEl = document.getElementById('stream_sf_schema');
                 const tableEl = document.getElementById('stream_table');
+                const newTableEl = document.getElementById('stream_new_table');
+                const createNewChecked = document.getElementById('stream_create_new')?.checked;
                 const database = dbEl ? dbEl.value : '{DB}';
                 const schema = schemaEl ? schemaEl.value : '{SCHEMA_PRODUCTION}';
-                const tableName = tableEl ? tableEl.value : 'AMI_STREAMING_READINGS';
+                const tableName = (createNewChecked && newTableEl && newTableEl.value.trim())
+                    ? newTableEl.value.trim()
+                    : (tableEl ? tableEl.value : 'AMI_STREAMING_READINGS');
                 
                 btn.disabled = true;
                 msgEl.textContent = 'Checking...';
@@ -4270,14 +6120,41 @@ async def generate_page(
                         // Update hidden form field
                         document.getElementById('form_pipe_name').value = pipeName;
                     }} else if (data.status === 'partial') {{
-                        statusEl.innerHTML = '<span style="color: #f59e0b;">&#x26A0; Partial</span>';
-                        const errCount = data.errors ? data.errors.length : 0;
-                        msgEl.textContent = 'Created with ' + errCount + ' warning(s) - may already exist';
-                        msgEl.style.color = '#f59e0b';
+                        // Check if all errors are benign "already exists" type
+                        const errs = data.errors || [];
+                        const allBenign = errs.length > 0 && errs.every(e => {{
+                            const msg = (e.error || '').toLowerCase();
+                            return msg.includes('already exists') || msg.includes('already granted')
+                                || msg.includes('object already exists');
+                        }});
+                        if (allBenign) {{
+                            statusEl.innerHTML = '<span style="color: #22c55e;">&#x2713; Ready</span>';
+                            msgEl.textContent = 'PIPE and table already exist — ready for streaming';
+                            msgEl.style.color = '#22c55e';
+                        }} else {{
+                            statusEl.innerHTML = '<span style="color: #f59e0b;">&#x26A0; Partial</span>';
+                            // Show first real error detail — strip Snowflake query ID noise
+                            const firstErr = errs.find(e => {{
+                                const msg = (e.error || '').toLowerCase();
+                                return !msg.includes('already exists') && !msg.includes('already granted');
+                            }});
+                            let detail = firstErr ? firstErr.error : ('DDL partially applied with ' + errs.length + ' issue(s)');
+                            // Strip Snowflake error prefix like "(1304): 01c2bf96-...:002003 (02000): "
+                            detail = detail.replace(/^\(\d+\):\s*[\w-]+:\d+\s*\(\d+\):\s*/i, '');
+                            // Also strip embedded query IDs
+                            detail = detail.replace(/[\da-f]{{8}}-[\da-f]{{4}}-[\da-f]{{4}}-[\da-f]{{4}}-[\da-f]{{12}}:\d+/gi, '').trim();
+                            if (detail.length > 150) detail = detail.substring(0, 150) + '\u2026';
+                            msgEl.textContent = detail;
+                            msgEl.style.color = '#f59e0b';
+                        }}
                         document.getElementById('form_pipe_name').value = pipeName;
                     }} else {{
                         statusEl.innerHTML = '<span style="color: #ef4444;">&#x2717; Error</span>';
-                        msgEl.textContent = data.message || 'Failed to create PIPE';
+                        let errMsg = data.message || 'Failed to create PIPE';
+                        errMsg = errMsg.replace(/^\(\d+\):\s*[\w-]+:\d+\s*\(\d+\):\s*/i, '');
+                        errMsg = errMsg.replace(/[\da-f]{{8}}-[\da-f]{{4}}-[\da-f]{{4}}-[\da-f]{{4}}-[\da-f]{{12}}:\d+/gi, '').trim();
+                        if (errMsg.length > 150) errMsg = errMsg.substring(0, 150) + '\u2026';
+                        msgEl.textContent = errMsg;
                         msgEl.style.color = '#ef4444';
                     }}
                 }} catch (err) {{
@@ -4387,7 +6264,7 @@ async def generate_page(
                             <div id="stage_url_hint" style="font-size: 0.7rem; color: #64748b; margin-bottom: 6px;">
                                 💡 Leave empty for Snowflake-managed internal stage
                             </div>
-                            <button type="button" onclick="createStageNow()" style="background: #0ea5e9; color: white; border: none; border-radius: 4px; padding: 6px 10px; font-size: 0.7rem; cursor: pointer; width: 100%;">
+                            <button type="button" class="btn-step cyan" onclick="createStageNow()">
                                 {get_material_icon('add', '14px')} Create Stage
                             </button>
                         </div>
@@ -4500,7 +6377,7 @@ async def generate_page(
                                 </div>
                             </div>
                             
-                            <button type="button" onclick="createBronzeTable()" style="background: #38bdf8; color: white; border: none; border-radius: 4px; padding: 6px 10px; font-size: 0.7rem; cursor: pointer; width: 100%;">
+                            <button type="button" class="btn-step blue" onclick="createBronzeTable()">
                                 {get_material_icon('add', '14px')} Create Bronze Table
                             </button>
                         </div>
@@ -5893,7 +7770,7 @@ FILE_FORMAT = (TYPE = ${{fileFormat}});`;
                 select.innerHTML = '<option value="">-- Select Table --</option>';
                 data.tables.forEach(tbl => {{
                     const opt = document.createElement('option');
-                    opt.value = `${{db}}.${{schema}}.${{tbl}}`;
+                    opt.value = tbl;
                     opt.textContent = tbl;
                     if (tbl === 'AMI_STREAMING_DATA') opt.selected = true;
                     select.appendChild(opt);
@@ -5914,6 +7791,7 @@ FILE_FORMAT = (TYPE = ${{fileFormat}});`;
                 newInput.style.display = 'none';
                 selectTable.style.display = 'block';
             }}
+            if (typeof syncStreamFields === 'function') syncStreamFields();
         }}
         
         // Sync form fields with UI controls (for production matching)
@@ -5980,6 +7858,7 @@ FILE_FORMAT = (TYPE = ${{fileFormat}});`;
         // Intercept form submission to ensure fields are synced
         document.getElementById('streaming_form')?.addEventListener('submit', function(e) {{
             syncFormFields();
+            if (typeof syncStreamFields === 'function') syncStreamFields();
         }});
         </script>
         '''
@@ -6229,7 +8108,7 @@ async def monitor_page():
             active_memory_jobs = []
             with streaming_lock:
                 for jid, jdata in active_streaming_jobs.items():
-                    if jdata['status'] in ['RUNNING', 'STARTING']:
+                    if jdata['status'] in ['RUNNING', 'STARTING', 'ERROR']:
                         stats = jdata.get('stats', {})
                         config = jdata.get('config', {})
                         active_memory_jobs.append({
@@ -6245,8 +8124,10 @@ async def monitor_page():
                             'total_rows_sent': stats.get('total_rows', 0),
                             'batches_sent': stats.get('batches_sent', 0),
                             'errors': stats.get('errors', 0),
+                            'last_error': stats.get('last_error', ''),
                             'last_batch': str(stats.get('last_batch_time', ''))[:19] if stats.get('last_batch_time') else 'N/A',
-                            'is_live': True
+                            'is_live': jdata['status'] != 'ERROR',
+                            'is_error': jdata['status'] == 'ERROR',
                         })
                         snowpipe_count += 1
             
@@ -6408,8 +8289,9 @@ async def monitor_page():
                 #  Only truly LIVE jobs count as running (in-memory = is_live=True)
                 # DB jobs marked RUNNING are stale if not in memory
                 running_jobs = [j for j in sdk_jobs if j.get('is_live', False)]
+                error_jobs = [j for j in sdk_jobs if j.get('is_error', False)]
                 stale_jobs = [j for j in sdk_jobs if j.get('is_stale', False)]
-                other_jobs = [j for j in sdk_jobs if not j.get('is_live', False) and not j.get('is_stale', False)]
+                other_jobs = [j for j in sdk_jobs if not j.get('is_live', False) and not j.get('is_stale', False) and not j.get('is_error', False)]
                 
                 #  If there are stale jobs but no live jobs, show a notice
                 if stale_jobs and not running_jobs:
@@ -6428,17 +8310,26 @@ async def monitor_page():
                 if running_jobs:
                     snowpipe_html += f'<div style="margin-bottom: 16px;"><div style="color: #22c55e; font-weight: 600; margin-bottom: 8px;">● Active SDK Jobs ({len(running_jobs)})</div>'
                     for j in running_jobs:
-                        # Determine SDK type with proper handling for Stage Landing streams
+                        # Determine SDK type with proper handling for fallbacks and Stage Landing
                         mechanism = j.get('mechanism', '').lower()
+                        sdk_fallback_note = ''
                         if 'stage_json' in mechanism:
                             sdk_type = 'Stage Landing (Snowpipe)' if 'ext' in mechanism else 'Stage Landing (Internal)'
                             sdk_color = '#0ea5e9'  # Blue for stage-based
-                        elif 'hp' in mechanism:
+                        elif 'hp' in mechanism and 'fallback' not in mechanism and 'auto-local' not in mechanism:
                             sdk_type = 'High-Performance'
                             sdk_color = '#22c55e'  # Green for HP
+                        elif 'auto-local' in mechanism:
+                            sdk_type = 'SQL INSERT (Local Mode)'
+                            sdk_color = '#f59e0b'
+                            sdk_fallback_note = 'HP SDK requires key-pair auth or SPCS — using SQL INSERT locally'
+                        elif 'fallback' in mechanism:
+                            sdk_type = 'SQL INSERT (HP Fallback)'
+                            sdk_color = '#f59e0b'
+                            sdk_fallback_note = 'HP SDK failed to initialize — fell back to SQL INSERT'
                         else:
-                            sdk_type = 'Classic'
-                            sdk_color = '#f59e0b'  # Amber for classic
+                            sdk_type = 'SQL INSERT (Snowpark)'
+                            sdk_color = '#f59e0b'
                         
                         #  Calculate time since last batch for this job
                         last_batch_str = j.get('last_batch', 'N/A')
@@ -6471,6 +8362,7 @@ async def monitor_page():
                                         SDK: <span style="color: {sdk_color};">{sdk_type}</span> | 
                                         Target: <span style="color: #38bdf8;">{j['target_table']}</span>
                                     </div>
+                                    {'<div style="color: #f59e0b; font-size: 0.7rem; margin-top: 2px; padding: 2px 6px; background: rgba(245,158,11,0.1); border-radius: 4px; display: inline-block;">' + sdk_fallback_note + '</div>' if sdk_fallback_note else ''}
                                     <div style="color: #64748b; font-size: 0.75rem; margin-top: 2px;">
                                         Config: {j['meters']:,} meters
                                     </div>
@@ -6492,6 +8384,37 @@ async def monitor_page():
                             </div>
                             <div style="margin-top: 6px; padding: 6px 8px; background: rgba(56,189,248,0.1); border-radius: 4px; font-size: 0.7rem; color: #94a3b8;">
                                 💡 Snowpipe Streaming buffers rows and flushes in batches. "0 rows/sec" is normal during buffering.
+                            </div>
+                        </div>
+                        '''
+                    snowpipe_html += '</div>'
+                
+                # Show ERROR jobs with clear error details
+                if error_jobs:
+                    snowpipe_html += f'<div style="margin-bottom: 16px;"><div style="color: #ef4444; font-weight: 600; margin-bottom: 8px;">&#x2717; Failed Jobs ({len(error_jobs)})</div>'
+                    for j in error_jobs:
+                        last_err = j.get('last_error', 'Unknown error')
+                        snowpipe_html += f'''
+                        <div style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 8px; padding: 12px; margin-bottom: 8px;">
+                            <div style="display: flex; justify-content: space-between; align-items: start;">
+                                <div style="flex: 1;">
+                                    <div style="color: #e2e8f0; font-weight: 600; font-family: monospace;">{j['job_id']}</div>
+                                    <div style="color: #64748b; font-size: 0.8rem; margin-top: 4px;">
+                                        Target: <span style="color: #38bdf8;">{j['target_table']}</span> | 
+                                        Errors: <span style="color: #ef4444;">{j.get('errors', 0)}</span>
+                                    </div>
+                                </div>
+                                <div style="text-align: right;">
+                                    <span style="background: #ef4444; color: white; padding: 2px 8px; border-radius: 4px; font-size: 0.7rem;">ERROR</span>
+                                    <form action="/api/streaming/stop" method="post" style="margin-top: 4px;">
+                                        <input type="hidden" name="job_id" value="{j.get('job_id', '')}">
+                                        <button type="submit" class="btn-secondary" style="padding: 2px 6px; font-size: 0.65rem;">Dismiss</button>
+                                    </form>
+                                </div>
+                            </div>
+                            <div style="margin-top: 8px; padding: 8px; background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.2); border-radius: 4px; font-size: 0.75rem;">
+                                <div style="color: #ef4444; font-weight: 500; margin-bottom: 4px;">Stopped after repeated failures:</div>
+                                <div style="color: #fca5a5; font-family: monospace; word-break: break-all;">{last_err}</div>
                             </div>
                         </div>
                         '''
@@ -7287,6 +9210,37 @@ async def monitor_page():
                     }}
                 }}
                 
+                // Update grid topology widget
+                const topoEl = document.getElementById('grid-topology-widget');
+                if (topoEl && data.grid_topology) {{
+                    const t = data.grid_topology;
+                    const hasEvents = t.substations_active > 0 || t.circuits_active > 0 || t.transformers_active > 0;
+                    topoEl.style.display = 'block';
+                    topoEl.innerHTML = `
+                        <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
+                            <span class="material-symbols-rounded" style="font-size:16px;color:${{hasEvents ? '#f59e0b' : '#22c55e'}};">${{hasEvents ? 'warning' : 'check_circle'}}</span>
+                            <span style="color:#e2e8f0;font-weight:600;font-size:0.8rem;">Grid Topology</span>
+                            <span style="color:${{hasEvents ? '#f59e0b' : '#64748b'}};font-size:0.7rem;margin-left:auto;">${{hasEvents ? 'ACTIVE EVENTS' : 'NOMINAL'}}</span>
+                        </div>
+                        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;text-align:center;">
+                            <div style="background:rgba(30,41,59,0.5);border-radius:6px;padding:8px 4px;">
+                                <div style="color:${{t.substations_active > 0 ? '#ef4444' : '#94a3b8'}};font-size:1.1rem;font-weight:700;">${{t.substations_active}}<span style="color:#64748b;font-weight:400;">/${{t.substations_total}}</span></div>
+                                <div style="color:#64748b;font-size:0.65rem;margin-top:2px;">Substations</div>
+                            </div>
+                            <div style="background:rgba(30,41,59,0.5);border-radius:6px;padding:8px 4px;">
+                                <div style="color:${{t.circuits_active > 0 ? '#f59e0b' : '#94a3b8'}};font-size:1.1rem;font-weight:700;">${{t.circuits_active}}<span style="color:#64748b;font-weight:400;">/${{t.circuits_total}}</span></div>
+                                <div style="color:#64748b;font-size:0.65rem;margin-top:2px;">Circuits</div>
+                            </div>
+                            <div style="background:rgba(30,41,59,0.5);border-radius:6px;padding:8px 4px;">
+                                <div style="color:${{t.transformers_active > 0 ? '#ef4444' : '#94a3b8'}};font-size:1.1rem;font-weight:700;">${{t.transformers_active}}<span style="color:#64748b;font-weight:400;">/${{t.transformers_total}}</span></div>
+                                <div style="color:#64748b;font-size:0.65rem;margin-top:2px;">Transformers</div>
+                            </div>
+                        </div>
+                    `;
+                }} else if (topoEl) {{
+                    topoEl.style.display = 'none';
+                }}
+                
                 // Flash indicator to show refresh happened
                 const indicator = document.querySelector('.refresh-indicator');
                 if (indicator) {{
@@ -7445,6 +9399,9 @@ async def monitor_page():
                     <div class="metric-label">rows in streaming tables</div>
                 </div>
             </div>
+            
+            <!-- Grid Topology Status (populated via AJAX auto-refresh) -->
+            <div id="grid-topology-widget" class="panel" style="display:none; margin-bottom: 16px; padding: 14px 16px;"></div>
             
             <!--  Section order follows data pipeline flow: Generator → S3 Stage → Snowpipe → Bronze Table → Tasks -->
             
@@ -8074,6 +10031,23 @@ async def stop_streaming_job(job_id: str = Form(...)):
         return HTMLResponse(f"<script>alert('Failed to stop job: {html.escape(str(e))}'); window.location='/monitor';</script>")
 
 
+def _compute_latency_percentiles(latencies: list) -> dict:
+    """Compute P50/P95/P99/min/max/avg from a list of batch latency values (ms)."""
+    if not latencies:
+        return {}
+    lats = sorted(latencies)
+    n = len(lats)
+    return {
+        "p50_ms": round(lats[int(n * 0.50)], 1),
+        "p95_ms": round(lats[min(int(n * 0.95), n - 1)], 1),
+        "p99_ms": round(lats[min(int(n * 0.99), n - 1)], 1),
+        "min_ms": round(lats[0], 1),
+        "max_ms": round(lats[-1], 1),
+        "avg_ms": round(sum(lats) / n, 1),
+        "samples": n,
+    }
+
+
 @app.get("/api/streaming/status")
 async def get_streaming_status():
     """Get status of all active streaming jobs"""
@@ -8094,8 +10068,22 @@ async def get_streaming_status():
                 'total_rows_sent': stats.get('total_rows', 0),
                 'batches_sent': stats.get('batches_sent', 0),
                 'errors': stats.get('errors', 0),
+                'peak_rps': round(stats.get('peak_rps', 0), 1),
                 'start_time': str(stats.get('start_time', ''))[:19],
                 'last_batch_time': str(stats.get('last_batch_time', ''))[:19] if stats.get('last_batch_time') else None,
+                'perf': _compute_latency_percentiles(stats.get('batch_latencies', [])),
+                'source': stats.get('source', config.get('stream_source', 'test')),
+                # Grid topology state (correlated outages & voltage)
+                'grid_topology': stats.get('grid_topology'),
+                # Comparison mode fields (only populated when mechanism == 'comparison')
+                'comparison': {
+                    'hp_sdk_perf': _compute_latency_percentiles(stats.get('hp_sdk_latencies', [])),
+                    'sql_insert_perf': _compute_latency_percentiles(stats.get('sql_insert_latencies', [])),
+                    'hp_sdk_rows': stats.get('hp_sdk_rows', 0),
+                    'sql_insert_rows': stats.get('sql_insert_rows', 0),
+                    'hp_sdk_errors': stats.get('hp_sdk_errors', 0),
+                    'sql_insert_errors': stats.get('sql_insert_errors', 0),
+                } if stats.get('mechanism') == 'comparison' else None,
             })
     
     return JSONResponse({'active_jobs': jobs, 'count': len(jobs)})
@@ -8123,7 +10111,15 @@ async def start_stream(
     new_stage_name: str = Form(None),  # For creating new stages
     stage_file_format: str = Form("json"),
     # HP Streaming PIPE parameter
-    pipe_name: str = Form("AMI_STREAMING_PIPE")
+    pipe_name: str = Form("AMI_STREAMING_PIPE"),
+    # Source & comparison parameters
+    stream_source: str = Form("test"),
+    eh_conn_str: str = Form(""),
+    eh_name: str = Form(""),
+    eh_consumer_group: str = Form("$Default"),
+    ps_project: str = Form(""),
+    ps_subscription: str = Form(""),
+    compare_mode: str = Form(""),
 ):
     """
     Start a streaming job with production-matched meter data.
@@ -8383,11 +10379,33 @@ async def start_stream(
                     'mechanism': mechanism,
                     'sdk_type': sdk_type,
                     'pipe_name': pipe_name,
+                    # Source-specific config
+                    'stream_source': stream_source,
+                    'eh_conn_str': eh_conn_str,
+                    'eh_name': eh_name,
+                    'eh_consumer_group': eh_consumer_group,
+                    'ps_project': ps_project,
+                    'ps_subscription': ps_subscription,
+                    'compare_mode': compare_mode,
                 }
+                
+                # Choose worker based on source and comparison mode
+                if compare_mode == "1" and mechanism == 'snowpipe_hp':
+                    worker_target = comparison_streaming_worker
+                    worker_label = "HP SDK vs SQL INSERT Comparison"
+                elif stream_source == "eventhub":
+                    worker_target = eventhub_streaming_worker
+                    worker_label = "EventHub → Snowflake"
+                elif stream_source == "pubsub":
+                    worker_target = pubsub_streaming_worker
+                    worker_label = "PubSub → Snowflake"
+                else:
+                    worker_target = snowpipe_streaming_worker
+                    worker_label = f"Snowpipe Streaming ({sdk_type})"
                 
                 # Create and start streaming thread
                 worker_thread = threading.Thread(
-                    target=snowpipe_streaming_worker,
+                    target=worker_target,
                     args=(job_id, streaming_config),
                     daemon=True
                 )
@@ -8408,7 +10426,7 @@ async def start_stream(
                 
                 worker_thread.start()
                 task_created = True
-                logger.info(f"Started Snowpipe Streaming worker: {job_id} ({sdk_type}, {rows_per_sec} rows/sec, Production Matched: {production_matched})")
+                logger.info(f"Started {worker_label} worker: {job_id} ({rows_per_sec} rows/sec, Production Matched: {production_matched})")
             
             elif mechanism == "raw_json_s3":
                 # Raw JSON streaming to S3 - Snowpipe auto-ingests
@@ -10315,6 +12333,16 @@ async def get_monitor_metrics():
     except Exception as e:
         logger.error(f"Monitor metrics API error: {e}")
     
+    # Collect grid topology summary from active jobs
+    grid_topology = None
+    with streaming_lock:
+        for jid, jdata in active_streaming_jobs.items():
+            if jdata['status'] in ['RUNNING', 'STARTING']:
+                topo = jdata.get('stats', {}).get('grid_topology')
+                if topo:
+                    grid_topology = topo
+                    break  # Use first active job's topology
+    
     return {
         "active_streams": active_streams,
         "task_count": task_count,
@@ -10328,7 +12356,8 @@ async def get_monitor_metrics():
             "color": health_color,
             "icon": health_icon,
             "detail": health_detail
-        }
+        },
+        "grid_topology": grid_topology,
     }
 
 
@@ -11985,24 +14014,53 @@ async def deploy_streaming_ddl(
     if not snowflake_session:
         raise HTTPException(503, "Snowflake not connected")
     
+    logger.info(f"deploy_streaming_ddl: arch={architecture} db={database} schema={schema} table={table_name} pipe={pipe_name}")
+    
+    # ── Normalize names: strip database.schema prefix if already qualified ──
+    # The UI dropdown may send fully-qualified names like "FLUX_DB.DEV.HP_TEST_MAR_1"
+    # but the DDL generator also prepends database.schema, causing double-qualification.
+    if '.' in table_name:
+        table_name = table_name.split('.')[-1]
+    if '.' in pipe_name:
+        pipe_name = pipe_name.split('.')[-1]
+    logger.info(f"deploy_streaming_ddl (normalized): table={table_name} pipe={pipe_name}")
+    
     try:
         from snowpipe_streaming_impl import (
             generate_classic_streaming_ddl,
             generate_hp_streaming_ddl
         )
         
+        # ── Introspect actual table columns (if the table already exists) ──
+        table_columns = None
+        try:
+            desc_result = snowflake_session.sql(
+                f"DESC TABLE {database}.{schema}.{table_name}"
+            ).collect()
+            table_columns = [
+                {"name": r["name"], "type": r["type"]}
+                for r in desc_result
+            ]
+            logger.info(f"Introspected {len(table_columns)} columns from {database}.{schema}.{table_name}")
+        except Exception:
+            # Table doesn't exist yet — will be created by the DDL generator
+            logger.info(f"Table {database}.{schema}.{table_name} does not exist yet; using default schema")
+
         # Generate DDL
         if architecture.lower() in ('classic', 'snowpipe_classic'):
             ddl = generate_classic_streaming_ddl(database, schema, table_name)
         else:
-            ddl = generate_hp_streaming_ddl(database, schema, table_name, pipe_name)
+            ddl = generate_hp_streaming_ddl(
+                database, schema, table_name, pipe_name,
+                table_columns=table_columns,
+            )
         
         # Execute DDL statements
         executed_statements = []
         errors = []
         
-        # Split by semicolons but respect comments
-        statements = [s.strip() for s in ddl.split(';') if s.strip() and not s.strip().startswith('--')]
+        # Split by semicolons (comment stripping happens per-statement below)
+        statements = [s.strip() for s in ddl.split(';') if s.strip()]
         
         for stmt in statements:
             # Skip comments and empty lines
@@ -12018,17 +14076,50 @@ async def deploy_streaming_ddl(
                     snowflake_session.sql(clean_stmt).collect()
                     executed_statements.append(clean_stmt[:100] + '...')
                 except Exception as e:
-                    errors.append({"statement": clean_stmt[:100], "error": str(e)})
+                    import re
+                    err_str = str(e)
+                    logger.warning(f"DDL statement failed: {clean_stmt[:200]}  |  Error: {err_str[:300]}")
+                    # Strip Snowflake query ID noise: "(1304): 01c2bf96-...:002003 (02000): "
+                    err_str = re.sub(r'^\(\d+\):\s*[\w-]+:\d+\s*\(\d+\):\s*', '', err_str)
+                    err_str = re.sub(r'[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}:\d+', '', err_str).strip()
+                    errors.append({"statement": clean_stmt[:200], "error": err_str})
+        
+        # Classify errors as benign vs real failures
+        # GRANT failures are non-critical: the PIPE and table are the essential objects
+        benign_keywords = ['already exists', 'already granted', 'object already exists']
+        benign_errors = []
+        real_errors = []
+        for err in errors:
+            err_msg = err.get('error', '').lower()
+            stmt_upper = err.get('statement', '').upper().strip()
+            is_grant = stmt_upper.startswith('GRANT')
+            if any(kw in err_msg for kw in benign_keywords):
+                benign_errors.append(err)
+            elif is_grant:
+                # GRANT failures are non-critical — log but treat as warning
+                logger.warning(f"Non-critical GRANT failure (treated as warning): {err}")
+                benign_errors.append(err)
+            else:
+                real_errors.append(err)
+        
+        # If all errors are benign, treat as success
+        if errors and not real_errors:
+            status = "success"
+        elif real_errors:
+            status = "partial"
+        else:
+            status = "success"
         
         return {
-            "status": "success" if not errors else "partial",
+            "status": status,
             "architecture": architecture,
             "database": database,
             "schema": schema,
             "table": table_name,
             "pipe": pipe_name if architecture.lower() in ('hp', 'snowpipe_hp') else None,
             "executed": len(executed_statements),
-            "errors": errors
+            "errors": real_errors,
+            "warnings": benign_errors,
         }
         
     except Exception as e:
