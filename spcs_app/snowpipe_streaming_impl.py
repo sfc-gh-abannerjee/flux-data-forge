@@ -153,10 +153,17 @@ class SnowpipeStreamingConfig:
             self.database = os.environ.get('SNOWFLAKE_DATABASE', DB)
         if not self.schema:
             self.schema = os.environ.get('SNOWFLAKE_SCHEMA', SCHEMA_PRODUCTION)
+        # Snowpark session.get_current_*() returns values wrapped in quotes;
+        # strip them so account URLs and SDK properties are clean.
+        for field in ('account', 'user', 'role', 'database', 'schema'):
+            val = getattr(self, field)
+            if val:
+                setattr(self, field, val.strip('"').strip("'"))
 
     def get_account_url(self) -> str:
         """Get the Snowflake account URL"""
-        return f"https://{self.account}.snowflakecomputing.com"
+        acct = self.account.strip('"').strip("'")
+        return f"https://{acct}.snowflakecomputing.com"
 
     def load_private_key(self) -> str:
         """Load private key from file or environment"""

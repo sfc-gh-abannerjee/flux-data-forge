@@ -423,6 +423,7 @@ def snowpipe_streaming_worker(job_id: str, config: dict):
                     'pipe_name': config.get('pipe_name', 'AMI_STREAMING_PIPE'),
                     'client_name': f'flux_hp_{job_id}',
                     'channel_name': f'flux_channel_{job_id}',
+                    'private_key': _connection_params.get('private_key_pem', ''),
                 }
                 if session:
                     try:
@@ -445,6 +446,9 @@ def snowpipe_streaming_worker(job_id: str, config: dict):
                             active_streaming_jobs[job_id]['stats']['mechanism'] = 'sql_insert (fallback)'
                 else:
                     logger.info(f"Job {job_id}: HP SDK client initialized successfully")
+                    with streaming_lock:
+                        if job_id in active_streaming_jobs:
+                            active_streaming_jobs[job_id]['hp_client'] = hp_client
             except ImportError:
                 logger.error(f"Job {job_id}: snowpipe-streaming not installed, falling back to SQL INSERT")
                 hp_client = None
@@ -576,6 +580,7 @@ def snowpipe_streaming_worker(job_id: str, config: dict):
                 offset_token = f"{job_id}_batch_{batch_counter}"
                 batch_start = time.time()
                 hp_client.write_rows(batch, offset_token=offset_token)
+                hp_client.flush(timeout_seconds=10)
                 batch_latency_ms = (time.time() - batch_start) * 1000
                 
                 # Update stats
@@ -714,17 +719,33 @@ def eventhub_streaming_worker(job_id: str, config: dict):
             else:
                 try:
                     from snowpipe_streaming_impl import HPStreamingClient, SnowpipeStreamingConfig
-                    hp_config = SnowpipeStreamingConfig(
-                        architecture='hp',
-                        pipe_name=pipe_name,
-                        client_name=f'flux_eh_hp_{job_id}',
-                        channel_name=f'flux_eh_ch_{job_id}',
-                    )
+                    eh_hp_kwargs = {
+                        'architecture': 'hp',
+                        'pipe_name': pipe_name,
+                        'client_name': f'flux_eh_hp_{job_id}',
+                        'channel_name': f'flux_eh_ch_{job_id}',
+                        'private_key': _connection_params.get('private_key_pem', ''),
+                    }
+                    session = get_valid_session()
+                    if session:
+                        try:
+                            eh_hp_kwargs['account'] = session.get_current_account()
+                            eh_hp_kwargs['user'] = session.get_current_user()
+                            eh_hp_kwargs['role'] = session.get_current_role()
+                            eh_hp_kwargs['database'] = session.get_current_database()
+                            eh_hp_kwargs['schema'] = session.get_current_schema()
+                        except Exception:
+                            pass
+                    hp_config = SnowpipeStreamingConfig(**eh_hp_kwargs)
                     hp_client = HPStreamingClient(hp_config)
                     if not hp_client.initialize():
                         logger.error(f"[{job_id}] HP SDK init failed, falling back to SQL INSERT")
                         hp_client = None
                         mechanism = 'snowpipe_classic'
+                    else:
+                        with streaming_lock:
+                            if job_id in active_streaming_jobs:
+                                active_streaming_jobs[job_id]['hp_client'] = hp_client
                 except Exception as e:
                     logger.error(f"[{job_id}] HP SDK import/init error: {e}, falling back to SQL INSERT")
                     hp_client = None
@@ -743,6 +764,7 @@ def eventhub_streaming_worker(job_id: str, config: dict):
                 if mechanism == 'snowpipe_hp' and hp_client:
                     offset_token = f"{job_id}_eh_batch_{batch_counter}"
                     hp_client.write_rows(rows, offset_token=offset_token)
+                    hp_client.flush(timeout_seconds=10)
                 else:
                     session = get_valid_session()
                     if session:
@@ -902,17 +924,33 @@ def pubsub_streaming_worker(job_id: str, config: dict):
             else:
                 try:
                     from snowpipe_streaming_impl import HPStreamingClient, SnowpipeStreamingConfig
-                    hp_config = SnowpipeStreamingConfig(
-                        architecture='hp',
-                        pipe_name=pipe_name,
-                        client_name=f'flux_ps_hp_{job_id}',
-                        channel_name=f'flux_ps_ch_{job_id}',
-                    )
+                    ps_hp_kwargs = {
+                        'architecture': 'hp',
+                        'pipe_name': pipe_name,
+                        'client_name': f'flux_ps_hp_{job_id}',
+                        'channel_name': f'flux_ps_ch_{job_id}',
+                        'private_key': _connection_params.get('private_key_pem', ''),
+                    }
+                    session = get_valid_session()
+                    if session:
+                        try:
+                            ps_hp_kwargs['account'] = session.get_current_account()
+                            ps_hp_kwargs['user'] = session.get_current_user()
+                            ps_hp_kwargs['role'] = session.get_current_role()
+                            ps_hp_kwargs['database'] = session.get_current_database()
+                            ps_hp_kwargs['schema'] = session.get_current_schema()
+                        except Exception:
+                            pass
+                    hp_config = SnowpipeStreamingConfig(**ps_hp_kwargs)
                     hp_client = HPStreamingClient(hp_config)
                     if not hp_client.initialize():
                         logger.error(f"[{job_id}] HP SDK init failed, falling back to SQL INSERT")
                         hp_client = None
                         mechanism = 'snowpipe_classic'
+                    else:
+                        with streaming_lock:
+                            if job_id in active_streaming_jobs:
+                                active_streaming_jobs[job_id]['hp_client'] = hp_client
                 except Exception as e:
                     logger.error(f"[{job_id}] HP SDK import/init error: {e}, falling back to SQL INSERT")
                     hp_client = None
@@ -932,6 +970,7 @@ def pubsub_streaming_worker(job_id: str, config: dict):
                 if mechanism == 'snowpipe_hp' and hp_client:
                     offset_token = f"{job_id}_ps_batch_{batch_counter}"
                     hp_client.write_rows(rows, offset_token=offset_token)
+                    hp_client.flush(timeout_seconds=10)
                 else:
                     session = get_valid_session()
                     if session:
@@ -1109,16 +1148,32 @@ def comparison_streaming_worker(job_id: str, config: dict):
     else:
         try:
             from snowpipe_streaming_impl import HPStreamingClient, SnowpipeStreamingConfig
-            hp_config = SnowpipeStreamingConfig(
-                architecture='hp',
-                pipe_name=pipe_name,
-                client_name=f'flux_cmp_hp_{job_id}',
-                channel_name=f'flux_cmp_ch_{job_id}',
-            )
+            cmp_hp_kwargs = {
+                'architecture': 'hp',
+                'pipe_name': pipe_name,
+                'client_name': f'flux_cmp_hp_{job_id}',
+                'channel_name': f'flux_cmp_ch_{job_id}',
+                'private_key': _connection_params.get('private_key_pem', ''),
+            }
+            session = get_valid_session()
+            if session:
+                try:
+                    cmp_hp_kwargs['account'] = session.get_current_account()
+                    cmp_hp_kwargs['user'] = session.get_current_user()
+                    cmp_hp_kwargs['role'] = session.get_current_role()
+                    cmp_hp_kwargs['database'] = session.get_current_database()
+                    cmp_hp_kwargs['schema'] = session.get_current_schema()
+                except Exception:
+                    pass
+            hp_config = SnowpipeStreamingConfig(**cmp_hp_kwargs)
             hp_client = HPStreamingClient(hp_config)
             if not hp_client.initialize():
                 logger.error(f"[{job_id}] HP SDK init failed — comparison will only run SQL INSERT")
                 hp_client = None
+            else:
+                with streaming_lock:
+                    if job_id in active_streaming_jobs:
+                        active_streaming_jobs[job_id]['hp_client'] = hp_client
         except Exception as e:
             logger.error(f"[{job_id}] HP SDK error: {e} — comparison will only run SQL INSERT")
             hp_client = None
@@ -1225,6 +1280,7 @@ def comparison_streaming_worker(job_id: str, config: dict):
                     offset_token = f"{job_id}_cmp_hp_{batch_counter}"
                     t0 = time.time()
                     hp_client.write_rows(batch, offset_token=offset_token)
+                    hp_client.flush(timeout_seconds=10)
                     hp_latency = (time.time() - t0) * 1000
                 except Exception as e:
                     logger.error(f"[{job_id}] HP SDK batch error: {e}")
@@ -2976,6 +3032,44 @@ def get_base_styles():
             box-shadow: 0 2px 8px rgba(56, 189, 248, 0.3);
         }
         
+        /* Guided flow: step locking */
+        .step-section {
+            position: relative;
+            transition: opacity 0.3s ease, filter 0.3s ease;
+        }
+        .step-locked {
+            opacity: 0.3;
+            pointer-events: none;
+            filter: grayscale(0.5);
+        }
+        .step-locked::after {
+            content: attr(data-lock-msg);
+            position: absolute;
+            top: 36px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 0.8rem;
+            color: #94a3b8;
+            background: rgba(15,23,42,0.9);
+            padding: 6px 16px;
+            border-radius: 20px;
+            border: 1px solid rgba(148,163,184,0.2);
+            z-index: 10;
+            white-space: nowrap;
+        }
+        .step-locked .section-num {
+            background: #475569;
+            box-shadow: none;
+        }
+        @keyframes stepUnlock {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.005); }
+            100% { transform: scale(1); }
+        }
+        .step-unlocking {
+            animation: stepUnlock 0.3s ease;
+        }
+        
         /* Stable grid layouts - prevent resizing */
         .template-grid {
             display: grid;
@@ -4662,6 +4756,7 @@ async def api_connect(
             'account': creds.get('account', ''), 'user': creds.get('user', ''),
             'role': creds.get('role', ''), 'warehouse': creds.get('warehouse', ''),
             'database': creds.get('database', ''), 'auth_mode': auth_mode,
+            'private_key_pem': private_key if auth_mode == 'keypair' else '',
         })
         _post_connect_setup()
 
@@ -4861,6 +4956,19 @@ async def generate_page(
                     </select>
                 </div>
                 <div class="form-group">
+                    <label class="form-label">Batch Size (Rows)</label>
+                    <select id="batch_size_rows" onchange="recalcSDK(); syncSDKParams();">
+                        <option value="0" selected>Auto</option>
+                        <option value="10">10 rows</option>
+                        <option value="50">50 rows</option>
+                        <option value="100">100 rows</option>
+                        <option value="250">250 rows</option>
+                        <option value="500">500 rows</option>
+                        <option value="1000">1,000 rows</option>
+                        <option value="5000">5,000 rows</option>
+                    </select>
+                </div>
+                <div class="form-group">
                     <label class="form-label">MAX_CLIENT_LAG (seconds)</label>
                     <select id="max_client_lag" onchange="recalcSDK(); syncSDKParams();">
                         <option value="1" {'selected' if max_client_lag == 1 else ''}>1 sec (Default)</option>
@@ -4887,7 +4995,7 @@ async def generate_page(
                 </tr>
                 <tr>
                     <td>Rows per batch</td>
-                    <td class="value" id="sdk_rows_per_batch">{min(rows_per_sec, max_rows_per_batch):,}</td>
+                    <td class="value" id="sdk_rows_per_batch">{min(rows_per_sec, max_rows_per_batch):,} (auto)</td>
                     <td id="sdk_rows_limit">{max_rows_per_batch:,} (at {batch_size_mb}MB)</td>
                 </tr>
                 <tr>
@@ -4914,9 +5022,15 @@ async def generate_page(
                 const rps = parseInt(document.getElementById('rows_per_sec').value) || 1000;
                 const batchMB = parseInt(document.getElementById('batch_size_mb').value) || 10;
                 const lag = parseInt(document.getElementById('max_client_lag').value) || 1;
+                const batchRowsSel = document.getElementById('batch_size_rows');
+                const batchRowsVal = batchRowsSel ? parseInt(batchRowsSel.value) || 0 : 0;
                 
                 const maxRowsPerBatch = Math.floor((batchMB * 1024 * 1024) / ROW_SIZE_BYTES);
-                const batchesPerSec = maxRowsPerBatch > 0 ? Math.max(1, Math.floor(rps / maxRowsPerBatch)) : 1;
+                // Effective rows per batch: explicit selection (capped by SDK limit) or auto
+                const effectiveRowsPerBatch = batchRowsVal > 0
+                    ? Math.min(batchRowsVal, maxRowsPerBatch)
+                    : Math.min(rps, maxRowsPerBatch);
+                const batchesPerSec = effectiveRowsPerBatch > 0 ? Math.max(1, Math.ceil(rps / effectiveRowsPerBatch)) : 1;
                 const throughputMBs = (rps * ROW_SIZE_BYTES) / (1024 * 1024);
                 
                 // Update slider display value
@@ -4926,7 +5040,10 @@ async def generate_page(
                 document.getElementById('est_throughput').textContent = throughputMBs.toFixed(2) + ' MB/s';
                 
                 // Update table
-                document.getElementById('sdk_rows_per_batch').textContent = Math.min(rps, maxRowsPerBatch).toLocaleString();
+                const batchLabel = batchRowsVal > 0
+                    ? effectiveRowsPerBatch.toLocaleString() + ' (explicit)'
+                    : effectiveRowsPerBatch.toLocaleString() + ' (auto)';
+                document.getElementById('sdk_rows_per_batch').textContent = batchLabel;
                 document.getElementById('sdk_rows_limit').textContent = maxRowsPerBatch.toLocaleString() + ' (at ' + batchMB + 'MB)';
                 document.getElementById('sdk_batches_per_sec').textContent = batchesPerSec.toLocaleString();
                 document.getElementById('sdk_flush_interval').textContent = lag + ' sec';
@@ -4938,9 +5055,15 @@ async def generate_page(
                 const rowsInput = document.getElementById('rows_per_sec');
                 const batchSelect = document.getElementById('batch_size_mb');
                 const lagSelect = document.getElementById('max_client_lag');
+                const batchRowsSelect = document.getElementById('batch_size_rows');
                 if (rowsInput) params.set('rows_per_sec', rowsInput.value);
                 if (batchSelect) params.set('batch_size_mb', batchSelect.value);
                 if (lagSelect) params.set('max_client_lag', lagSelect.value);
+                if (batchRowsSelect) {{
+                    params.set('batch_size_rows', batchRowsSelect.value);
+                    const hidden = document.getElementById('form_batch_size_rows');
+                    if (hidden) hidden.value = batchRowsSelect.value;
+                }}
                 window.history.replaceState(null, '', window.location.pathname + '?' + params.toString());
             }}
             </script>
@@ -5243,13 +5366,6 @@ async def generate_page(
             </div>
         </div>
         
-        <!-- V1 vs V2 Comparison Toggle -->
-        <div id="compare_toggle_section" style="padding: 10px 14px; background: rgba(168,85,247,0.08); border: 1px solid rgba(168,85,247,0.2); border-radius: 8px; display:none; margin-bottom: 16px;">
-            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 0.85rem; color: #e2e8f0;">
-                <input type="checkbox" id="compare_mode_cb" value="1" onchange="syncStreamFields()">
-                <b>V1 vs V2 Comparison</b> &mdash; Run HP SDK (V2) and SQL INSERT (V1) simultaneously to compare throughput
-            </label>
-        </div>
         
         <script>
         // Sync main-column inputs to sidebar form hidden fields
@@ -5266,8 +5382,6 @@ async def generate_page(
             if (f('form_eh_consumer_group')) f('form_eh_consumer_group').value = f('eh_consumer_group')?.value || '$Default';
             if (f('form_ps_project')) f('form_ps_project').value = f('ps_project')?.value || '';
             if (f('form_ps_subscription')) f('form_ps_subscription').value = f('ps_subscription')?.value || '';
-            // Compare mode
-            if (f('form_compare_mode')) f('form_compare_mode').value = f('compare_mode_cb')?.checked ? '1' : '';
             // Update sidebar display
             const targetDisplay = f('sidebar_target_display');
             if (targetDisplay) {{
@@ -5298,17 +5412,15 @@ async def generate_page(
             }});
             document.getElementById('eventhub_fields').style.display = src === 'eventhub' ? '' : 'none';
             document.getElementById('pubsub_fields').style.display = src === 'pubsub' ? '' : 'none';
-            const cmpEl = document.getElementById('compare_toggle_section');
-            if (cmpEl) cmpEl.style.display = (src === 'test') ? '' : 'none';
+            // Hide test-data-only steps (Behavior/Format + Preview) for external sources
+            const testOnly = (src === 'test');
+            const s8 = document.getElementById('step-8-section');
+            const s9 = document.getElementById('step-9-section');
+            if (s8) s8.style.display = testOnly ? '' : 'none';
+            if (s9) s9.style.display = testOnly ? '' : 'none';
             syncStreamFields();
+            if (typeof updateStepAvailability === 'function') updateStepAvailability();
         }}
-        (function() {{
-            const mechanism = '{mechanism}';
-            if (mechanism === 'snowpipe_hp') {{
-                const cmpEl = document.getElementById('compare_toggle_section');
-                if (cmpEl) cmpEl.style.display = '';
-            }}
-        }})();
         </script>
         
         <div class="divider"></div>
@@ -5675,6 +5787,202 @@ async def generate_page(
         
         {sdk_limits_html}
         {advisor_script}
+        
+        <!-- Guided Flow: runtime section wrapping + step availability -->
+        <script>
+        (function() {{
+            // ── Runtime section wrapping ──
+            // Maps section header text (prefix) → step ID
+            const stepMap = [
+                ['Data Flow', 'step-3-section'],
+                ['Configure Fleet', 'step-4-section'],
+                ['Snowflake Target', 'step-5-section'],
+                ['Streaming PIPE', 'step-6-section'],
+                ['Data Source', 'step-7-section'],
+                ['Streaming Behavior', 'step-8-section'],
+                ['Preview Records', 'step-9-section'],
+            ];
+            
+            function wrapSections() {{
+                const headers = document.querySelectorAll('.section-header');
+                headers.forEach(hdr => {{
+                    const text = hdr.textContent.trim();
+                    const match = stepMap.find(([prefix]) => text.includes(prefix));
+                    if (!match) return;
+                    const stepId = match[1];
+                    // Don't double-wrap
+                    if (document.getElementById(stepId)) return;
+                    
+                    // Collect this header + all siblings until the next section-header or divider
+                    const wrapper = document.createElement('div');
+                    wrapper.id = stepId;
+                    wrapper.className = 'step-section';
+                    
+                    hdr.parentNode.insertBefore(wrapper, hdr);
+                    
+                    let node = wrapper.nextSibling;
+                    wrapper.appendChild(hdr);
+                    while (node) {{
+                        const next = node.nextSibling;
+                        // Stop at divider or next section-header
+                        if (node.nodeType === 1) {{
+                            if (node.classList && node.classList.contains('divider')) break;
+                            if (node.classList && node.classList.contains('section-header')) break;
+                            // Also stop if we hit another step-section (already wrapped)
+                            if (node.classList && node.classList.contains('step-section')) break;
+                        }}
+                        wrapper.appendChild(node);
+                        node = next;
+                    }}
+                }});
+            }}
+            
+            // ── Step lock/unlock helpers ──
+            function lockStep(stepId, msg) {{
+                const el = document.getElementById(stepId);
+                if (!el) return;
+                el.classList.add('step-locked');
+                el.classList.remove('step-unlocking');
+                el.setAttribute('data-lock-msg', msg || 'Complete previous steps first');
+            }}
+            function unlockStep(stepId) {{
+                const el = document.getElementById(stepId);
+                if (!el) return;
+                if (!el.classList.contains('step-locked')) return;
+                el.classList.remove('step-locked');
+                el.classList.add('step-unlocking');
+                el.removeAttribute('data-lock-msg');
+                setTimeout(() => el.classList.remove('step-unlocking'), 400);
+            }}
+            
+            // ── Main availability logic ──
+            window.updateStepAvailability = function() {{
+                const f = id => document.getElementById(id);
+                
+                // Step 3: Data Flow — always unlocked
+                unlockStep('step-3-section');
+                
+                // Step 4: Fleet — needs a data flow card selected
+                const hasFlow = !!document.querySelector('.mechanism-card.selected, .flow-card.selected, .data-flow-card.selected, input[name="data_flow"]:checked');
+                // Also accept if the page loaded with a pre-selected flow (the card might use 'active' class)
+                const hasFlowAlt = !!document.querySelector('.mechanism-card.active');
+                if (hasFlow || hasFlowAlt) {{
+                    unlockStep('step-4-section');
+                }} else {{
+                    lockStep('step-4-section', 'Select a data flow first');
+                    // Lock everything downstream
+                    lockStep('step-5-section', 'Select a data flow first');
+                    lockStep('step-6-section', 'Select a data flow first');
+                    lockStep('step-7-section', 'Select a data flow first');
+                    lockStep('step-8-section', 'Select a data flow first');
+                    lockStep('step-9-section', 'Select a data flow first');
+                    setSubmitState(false);
+                    return;
+                }}
+                
+                // Step 5: Target — needs fleet size > 0
+                const fleetEl = f('custom_fleet_size');
+                const hasFleet = fleetEl && parseInt(fleetEl.value) > 0;
+                if (hasFleet) {{
+                    unlockStep('step-5-section');
+                }} else {{
+                    lockStep('step-5-section', 'Set fleet size first');
+                    lockStep('step-6-section', 'Set fleet size first');
+                    lockStep('step-7-section', 'Set fleet size first');
+                    lockStep('step-8-section', 'Set fleet size first');
+                    lockStep('step-9-section', 'Set fleet size first');
+                    setSubmitState(false);
+                    return;
+                }}
+                
+                // Step 6 (HP PIPE) + Step 7 (Data Source): need table selected
+                const createNew = f('stream_create_new')?.checked;
+                const hasTable = createNew
+                    ? !!(f('stream_new_table')?.value.trim())
+                    : !!(f('stream_table')?.value);
+                
+                if (hasTable) {{
+                    unlockStep('step-6-section');
+                    unlockStep('step-7-section');
+                }} else {{
+                    lockStep('step-6-section', 'Select a target table first');
+                    lockStep('step-7-section', 'Select a target table first');
+                    lockStep('step-8-section', 'Select a target table first');
+                    lockStep('step-9-section', 'Select a target table first');
+                    setSubmitState(false);
+                    return;
+                }}
+                
+                // Steps 8 & 9: only for test data source (visibility handled by setStreamSource)
+                const src = f('form_stream_source')?.value || 'test';
+                if (src === 'test') {{
+                    unlockStep('step-8-section');
+                    unlockStep('step-9-section');
+                }}
+                
+                // Enable submit when all required steps are satisfied
+                setSubmitState(true);
+            }};
+            
+            // ── Submit button state ──
+            function setSubmitState(enabled) {{
+                const form = document.getElementById('streaming_form');
+                if (!form) return;
+                const btn = form.querySelector('button[type="submit"]');
+                if (!btn) return;
+                if (enabled) {{
+                    btn.disabled = false;
+                    btn.style.opacity = '';
+                    btn.style.cursor = '';
+                    btn.style.pointerEvents = '';
+                }} else {{
+                    btn.disabled = true;
+                    btn.style.opacity = '0.4';
+                    btn.style.cursor = 'not-allowed';
+                    btn.style.pointerEvents = 'none';
+                }}
+            }}
+            
+            // ── Wire up event listeners ──
+            function wireStepGuard() {{
+                const listeners = [
+                    ['custom_fleet_size', 'input'],
+                    ['stream_sf_database', 'change'],
+                    ['stream_sf_schema', 'change'],
+                    ['stream_table', 'change'],
+                    ['stream_create_new', 'change'],
+                    ['stream_new_table', 'input'],
+                    ['hp_pipe_name', 'input'],
+                    ['reading_interval', 'change'],
+                    ['segment_filter', 'change'],
+                    ['data_format', 'change'],
+                ];
+                listeners.forEach(([id, evt]) => {{
+                    const el = document.getElementById(id);
+                    if (el) el.addEventListener(evt, window.updateStepAvailability);
+                }});
+                // Also listen for data flow card clicks
+                document.querySelectorAll('.mechanism-card').forEach(card => {{
+                    card.addEventListener('click', () => {{
+                        setTimeout(window.updateStepAvailability, 50);
+                    }});
+                }});
+            }}
+            
+            // ── Init on DOM ready ──
+            if (document.readyState === 'loading') {{
+                document.addEventListener('DOMContentLoaded', () => {{
+                    wrapSections();
+                    wireStepGuard();
+                    window.updateStepAvailability();
+                }});
+            }} else {{
+                wrapSections();
+                wireStepGuard();
+                window.updateStepAvailability();
+            }}
+        }})();
+        </script>
         '''
         
         streaming_info = f'''
@@ -6050,6 +6358,7 @@ async def generate_page(
             <input type="hidden" name="rows_per_sec" value="{rows_per_sec}">
             <input type="hidden" name="batch_size_mb" value="{batch_size_mb}">
             <input type="hidden" name="max_client_lag" value="{max_client_lag}"">
+            <input type="hidden" name="batch_size_rows" id="form_batch_size_rows" value="0">
             <!-- New production matching fields -->
             <input type="hidden" name="production_source" id="form_production_source" value="METER_INFRASTRUCTURE">
             <input type="hidden" name="emission_pattern" id="form_emission_pattern" value="STAGGERED_REALISTIC">
@@ -6065,7 +6374,6 @@ async def generate_page(
             <input type="hidden" name="eh_consumer_group" id="form_eh_consumer_group" value="$Default">
             <input type="hidden" name="ps_project" id="form_ps_project" value="">
             <input type="hidden" name="ps_subscription" id="form_ps_subscription" value="">
-            <input type="hidden" name="compare_mode" id="form_compare_mode" value="">
             '''
         
         # HP Streaming PIPE check script (used by main-column pipe section)
@@ -10058,6 +10366,14 @@ async def get_streaming_status():
         for job_id, job_data in active_streaming_jobs.items():
             stats = job_data.get('stats', {})
             config = job_data.get('config', {})
+            # Retrieve HP SDK channel-level metrics if available
+            hp_sdk_status = None
+            hp_client = job_data.get('hp_client')
+            if hp_client:
+                try:
+                    hp_sdk_status = hp_client.get_status()
+                except Exception:
+                    hp_sdk_status = None
             jobs.append({
                 'job_id': job_id,
                 'status': job_data.get('status', 'UNKNOWN'),
@@ -10073,6 +10389,8 @@ async def get_streaming_status():
                 'last_batch_time': str(stats.get('last_batch_time', ''))[:19] if stats.get('last_batch_time') else None,
                 'perf': _compute_latency_percentiles(stats.get('batch_latencies', [])),
                 'source': stats.get('source', config.get('stream_source', 'test')),
+                # HP SDK channel metrics (rows_inserted, rows_parsed, errors from Snowflake)
+                'hp_sdk_channel': hp_sdk_status,
                 # Grid topology state (correlated outages & voltage)
                 'grid_topology': stats.get('grid_topology'),
                 # Comparison mode fields (only populated when mechanism == 'comparison')
@@ -10099,6 +10417,7 @@ async def start_stream(
     rows_per_sec: int = Form(1000),
     batch_size_mb: int = Form(10),
     max_client_lag: int = Form(1),
+    batch_size_rows: int = Form(0),  # 0 = auto (min(rows_per_sec, 500))
     table: str = Form(f"{DB}.{SCHEMA_PRODUCTION}.AMI_STREAMING_DATA"),
     new_table: str = Form(None),
     # New production matching parameters
@@ -10371,7 +10690,7 @@ async def start_stream(
                 streaming_config = {
                     'meters': meters,
                     'rows_per_sec': rows_per_sec,
-                    'batch_size': min(rows_per_sec, 500),  # Batch up to 500 rows or rows_per_sec
+                    'batch_size': batch_size_rows if batch_size_rows > 0 else min(rows_per_sec, 500),
                     'service_area': service_area,
                     'emission_pattern': emission_pattern,
                     'production_source': production_source,
