@@ -11429,13 +11429,17 @@ async def openflow_page():
                     {get_material_icon('code', '20px')} Generate Deployment SQL
                 </button>
 
-                <!-- Generated SQL output -->
+                <!-- Generated output with tabs -->
                 <div id="of-sql-output" style="display:none;margin-top:16px;">
-                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-                        <span style="color:#94a3b8;font-size:0.82rem;font-weight:600;">Generated SQL</span>
-                        <button onclick="ofCopySql()" style="padding:5px 12px;border:1px solid rgba(148,163,184,0.15);border-radius:6px;background:rgba(30,41,59,0.7);color:#94a3b8;font-size:0.8rem;cursor:pointer;">Copy</button>
+                    <div style="display:flex;align-items:center;gap:0;margin-bottom:8px;">
+                        <button id="of-tab-sql" onclick="ofSwitchOutputTab('sql')" style="padding:6px 16px;border:1px solid rgba(148,163,184,0.15);border-bottom:none;border-radius:6px 6px 0 0;background:rgba(30,41,59,0.9);color:#e2e8f0;font-size:0.8rem;font-weight:600;cursor:pointer;">Deployment SQL</button>
+                        <button id="of-tab-flow" onclick="ofSwitchOutputTab('flow')" style="padding:6px 16px;border:1px solid rgba(148,163,184,0.15);border-bottom:none;border-radius:6px 6px 0 0;background:rgba(30,41,59,0.4);color:#94a3b8;font-size:0.8rem;font-weight:500;cursor:pointer;">Flow JSON</button>
+                        <div style="flex:1;"></div>
+                        <button id="of-copy-btn" onclick="ofCopyOutput()" style="padding:5px 12px;border:1px solid rgba(148,163,184,0.15);border-radius:6px;background:rgba(30,41,59,0.7);color:#94a3b8;font-size:0.8rem;cursor:pointer;">Copy</button>
+                        <button id="of-download-flow" onclick="ofDownloadFlowJson()" style="display:none;padding:5px 12px;border:1px solid rgba(148,163,184,0.15);border-radius:6px;background:rgba(30,41,59,0.7);color:#94a3b8;font-size:0.8rem;cursor:pointer;margin-left:6px;">{get_material_icon('download', '14px')} Download .json</button>
                     </div>
-                    <pre id="of-sql-pre" style="padding:16px;border-radius:8px;background:rgba(15,23,42,0.8);border:1px solid rgba(148,163,184,0.08);color:#e2e8f0;font-size:0.82rem;font-family:'SF Mono','Fira Code',monospace;overflow-x:auto;white-space:pre-wrap;max-height:500px;overflow-y:auto;"></pre>
+                    <pre id="of-sql-pre" style="padding:16px;border-radius:0 8px 8px 8px;background:rgba(15,23,42,0.8);border:1px solid rgba(148,163,184,0.08);color:#e2e8f0;font-size:0.82rem;font-family:'SF Mono','Fira Code',monospace;overflow-x:auto;white-space:pre-wrap;max-height:500px;overflow-y:auto;"></pre>
+                    <pre id="of-flow-pre" style="display:none;padding:16px;border-radius:0 8px 8px 8px;background:rgba(15,23,42,0.8);border:1px solid rgba(148,163,184,0.08);color:#e2e8f0;font-size:0.82rem;font-family:'SF Mono','Fira Code',monospace;overflow-x:auto;white-space:pre-wrap;max-height:500px;overflow-y:auto;"></pre>
                 </div>
             </div>
             </div><!-- /of-main -->
@@ -11855,7 +11859,12 @@ async def openflow_page():
                 const data = await resp.json();
                 if (data.sql) {{
                     document.getElementById('of-sql-pre').textContent = data.sql;
+                    if (data.flow_json) {{
+                        document.getElementById('of-flow-pre').textContent = JSON.stringify(data.flow_json, null, 2);
+                        window._ofFlowJson = data.flow_json;
+                    }}
                     document.getElementById('of-sql-output').style.display = 'block';
+                    ofSwitchOutputTab('sql');
                 }} else {{
                     alert(data.error || 'Failed to generate SQL');
                 }}
@@ -11864,13 +11873,59 @@ async def openflow_page():
             }}
         }}
 
-        function ofCopySql() {{
-            const sql = document.getElementById('of-sql-pre')?.textContent || '';
-            navigator.clipboard.writeText(sql).then(() => {{
-                const btn = event.target;
+        function ofSwitchOutputTab(tab) {{
+            const sqlPre = document.getElementById('of-sql-pre');
+            const flowPre = document.getElementById('of-flow-pre');
+            const tabSql = document.getElementById('of-tab-sql');
+            const tabFlow = document.getElementById('of-tab-flow');
+            const downloadBtn = document.getElementById('of-download-flow');
+            if (tab === 'sql') {{
+                sqlPre.style.display = 'block';
+                flowPre.style.display = 'none';
+                tabSql.style.background = 'rgba(30,41,59,0.9)';
+                tabSql.style.color = '#e2e8f0';
+                tabSql.style.fontWeight = '600';
+                tabFlow.style.background = 'rgba(30,41,59,0.4)';
+                tabFlow.style.color = '#94a3b8';
+                tabFlow.style.fontWeight = '500';
+                downloadBtn.style.display = 'none';
+            }} else {{
+                sqlPre.style.display = 'none';
+                flowPre.style.display = 'block';
+                tabFlow.style.background = 'rgba(30,41,59,0.9)';
+                tabFlow.style.color = '#e2e8f0';
+                tabFlow.style.fontWeight = '600';
+                tabSql.style.background = 'rgba(30,41,59,0.4)';
+                tabSql.style.color = '#94a3b8';
+                tabSql.style.fontWeight = '500';
+                downloadBtn.style.display = 'inline-block';
+            }}
+            window._ofActiveTab = tab;
+        }}
+
+        function ofCopyOutput() {{
+            const tab = window._ofActiveTab || 'sql';
+            const el = tab === 'sql' ? document.getElementById('of-sql-pre') : document.getElementById('of-flow-pre');
+            const text = el?.textContent || '';
+            navigator.clipboard.writeText(text).then(() => {{
+                const btn = document.getElementById('of-copy-btn');
                 btn.textContent = 'Copied!';
                 setTimeout(() => btn.textContent = 'Copy', 2000);
             }});
+        }}
+
+        function ofDownloadFlowJson() {{
+            if (!window._ofFlowJson) return;
+            const blob = new Blob([JSON.stringify(window._ofFlowJson, null, 2)], {{ type: 'application/json' }});
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            const name = window._ofFlowJson?.flowContents?.name || 'openflow_pipeline';
+            a.download = name + '.json';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
         }}
 
         // ── Sidebar progress tracking ──
@@ -11894,6 +11949,285 @@ async def openflow_page():
     </body>
     </html>
     """
+
+
+def build_flow_json(template: str, config: dict) -> dict:
+    """Build a NiFi-importable flow definition JSON for an Openflow pipeline.
+
+    Returns a dict representing a NiFi Process Group with source, transform,
+    and destination processors wired together. The output can be imported
+    directly into the Openflow / NiFi UI via the 'Upload Flow Definition' action.
+    """
+    import uuid
+
+    def _uid():
+        return str(uuid.uuid4())
+
+    dest_db = config.get("dest_db", "MY_DB")
+    dest_schema = config.get("dest_schema", "PUBLIC")
+    dest_table = config.get("dest_table", "MY_TABLE")
+    dest_method = config.get("dest_method", "snowpipe_streaming")
+    transforms = config.get("transforms", [])
+    eai_name = config.get("eai_name", "OPENFLOW_EAI")
+    eai_hosts = config.get("eai_hosts", "")
+    secret_name = config.get("secret_name", "")
+
+    # --- Source processor ---
+    source_processors = {
+        "kafka": {
+            "type": "org.apache.nifi.processors.kafka.consume.ConsumeKafka_2_6",
+            "name": "ConsumeKafka",
+            "properties": {
+                "bootstrap.servers": eai_hosts or "<BROKER_HOST:9092>",
+                "topic": "<TOPIC_NAME>",
+                "group.id": "openflow-consumer-group",
+                "security.protocol": "SASL_SSL",
+                "key.deserializer": "org.apache.kafka.common.serialization.StringDeserializer",
+                "value.deserializer": "org.apache.kafka.common.serialization.StringDeserializer",
+            },
+        },
+        "rest": {
+            "type": "org.apache.nifi.processors.standard.InvokeHTTP",
+            "name": "InvokeHTTP",
+            "properties": {
+                "Remote URL": eai_hosts or "<API_ENDPOINT_URL>",
+                "HTTP Method": "GET",
+                "Content-Type": "application/json",
+            },
+        },
+        "cdc": {
+            "type": "org.apache.nifi.cdc.mysql.processors.CaptureChangeMySQL",
+            "name": "CaptureChangeDB",
+            "properties": {
+                "Database Connection URL": "<jdbc:mysql://host:3306/db>",
+                "Database User": "<DB_USER>",
+                "Database Password": "<DB_PASSWORD>",
+                "table.include.list": "<schema.table_pattern>",
+            },
+        },
+        "files": {
+            "type": "org.apache.nifi.processors.aws.s3.ListS3",
+            "name": "ListS3",
+            "properties": {
+                "Bucket": "<BUCKET_NAME>",
+                "Prefix": "<PREFIX/>",
+                "Region": "us-west-2",
+            },
+        },
+        "datagen": {
+            "type": "org.apache.nifi.processors.standard.GenerateFlowFile",
+            "name": "GenerateTestData",
+            "properties": {
+                "File Size": "1 KB",
+                "Batch Size": "10",
+                "Data Format": "Text",
+                "Unique FlowFiles": "true",
+                "Custom Text": '{"id": "${UUID()}", "timestamp": "${now():format(\'yyyy-MM-dd HH:mm:ss\')}", "value": ${random():multiply(100):toNumber()}}',
+            },
+        },
+        "custom": {
+            "type": "org.apache.nifi.processors.standard.GenerateFlowFile",
+            "name": "CustomSource",
+            "properties": {
+                "File Size": "0 B",
+                "Batch Size": "1",
+            },
+        },
+    }
+
+    # --- Transform processors ---
+    transform_defs = {
+        "convert": {
+            "type": "org.apache.nifi.processors.standard.ConvertRecord",
+            "name": "ConvertRecord",
+            "properties": {
+                "Record Reader": "JsonTreeReader",
+                "Record Writer": "JsonRecordSetWriter",
+            },
+        },
+        "jolt": {
+            "type": "org.apache.nifi.processors.standard.JoltTransformJSON",
+            "name": "JoltTransformJSON",
+            "properties": {
+                "Jolt Specification": '[{"operation":"shift","spec":{"*":"&"}}]',
+                "Jolt Transform": "Chain",
+            },
+        },
+        "filter": {
+            "type": "org.apache.nifi.processors.standard.RouteOnAttribute",
+            "name": "RouteOnAttribute",
+            "properties": {
+                "Routing Strategy": "Route to Property name",
+                "matched": "${filename:isEmpty():not()}",
+            },
+        },
+        "enrich": {
+            "type": "org.apache.nifi.processors.attributes.UpdateAttribute",
+            "name": "UpdateAttribute",
+            "properties": {
+                "ingestion.timestamp": "${now():format('yyyy-MM-dd HH:mm:ss')}",
+                "source.pipeline": "openflow",
+            },
+        },
+    }
+
+    # --- Destination processor ---
+    if dest_method == "update_db":
+        dest_proc = {
+            "type": "com.snowflake.nifi.processors.UpdateSnowflakeDatabase",
+            "name": "UpdateSnowflakeDatabase",
+            "properties": {
+                "Database": dest_db,
+                "Schema": dest_schema,
+                "Table": dest_table,
+                "Snowflake URL": "<ACCOUNT>.snowflakecomputing.com",
+            },
+        }
+    else:
+        dest_proc = {
+            "type": "com.snowflake.nifi.processors.PutSnowpipeStreaming",
+            "name": "PutSnowpipeStreaming",
+            "properties": {
+                "Database": dest_db,
+                "Schema": dest_schema,
+                "Table": dest_table,
+                "Snowflake URL": "<ACCOUNT>.snowflakecomputing.com",
+                "Channel Name": f"OPENFLOW_{dest_table}_CHANNEL",
+            },
+        }
+
+    # Build processor list with positions
+    processors = []
+    connections = []
+    x_pos = 0
+    y_pos = 200
+
+    src_def = source_processors.get(template, source_processors["custom"])
+    src_id = _uid()
+    processors.append({
+        "identifier": src_id,
+        "name": src_def["name"],
+        "type": src_def["type"],
+        "position": {"x": x_pos, "y": y_pos},
+        "properties": src_def["properties"],
+        "autoTerminatedRelationships": ["failure"] if template != "files" else [],
+        "schedulingStrategy": "TIMER_DRIVEN",
+        "schedulingPeriod": "30 sec" if template == "rest" else "0 sec",
+    })
+
+    prev_id = src_id
+    x_pos += 400
+
+    # Add a FetchS3Object after ListS3 for the files template
+    if template == "files":
+        fetch_id = _uid()
+        processors.append({
+            "identifier": fetch_id,
+            "name": "FetchS3Object",
+            "type": "org.apache.nifi.processors.aws.s3.FetchS3Object",
+            "position": {"x": x_pos, "y": y_pos},
+            "properties": {
+                "Bucket": "<BUCKET_NAME>",
+                "Region": "us-west-2",
+            },
+            "autoTerminatedRelationships": ["failure"],
+            "schedulingStrategy": "TIMER_DRIVEN",
+            "schedulingPeriod": "0 sec",
+        })
+        connections.append({
+            "identifier": _uid(),
+            "source": {"id": prev_id},
+            "destination": {"id": fetch_id},
+            "selectedRelationships": ["success"],
+            "name": f"{src_def['name']} -> FetchS3Object",
+        })
+        prev_id = fetch_id
+        x_pos += 400
+
+    # Transform processors
+    for t in transforms:
+        t_def = transform_defs.get(t)
+        if not t_def:
+            continue
+        t_id = _uid()
+        processors.append({
+            "identifier": t_id,
+            "name": t_def["name"],
+            "type": t_def["type"],
+            "position": {"x": x_pos, "y": y_pos},
+            "properties": t_def["properties"],
+            "autoTerminatedRelationships": ["failure"],
+            "schedulingStrategy": "TIMER_DRIVEN",
+            "schedulingPeriod": "0 sec",
+        })
+        connections.append({
+            "identifier": _uid(),
+            "source": {"id": prev_id},
+            "destination": {"id": t_id},
+            "selectedRelationships": ["success"],
+            "name": f"-> {t_def['name']}",
+        })
+        prev_id = t_id
+        x_pos += 400
+
+    # Destination processor
+    dest_id = _uid()
+    processors.append({
+        "identifier": dest_id,
+        "name": dest_proc["name"],
+        "type": dest_proc["type"],
+        "position": {"x": x_pos, "y": y_pos},
+        "properties": dest_proc["properties"],
+        "autoTerminatedRelationships": ["failure"],
+        "schedulingStrategy": "TIMER_DRIVEN",
+        "schedulingPeriod": "0 sec",
+    })
+    connections.append({
+        "identifier": _uid(),
+        "source": {"id": prev_id},
+        "destination": {"id": dest_id},
+        "selectedRelationships": ["success"],
+        "name": f"-> {dest_proc['name']}",
+    })
+
+    # Controller services for record reading/writing
+    controller_services = []
+    if any(t in transforms for t in ["convert", "jolt"]):
+        controller_services.append({
+            "identifier": _uid(),
+            "name": "JsonTreeReader",
+            "type": "org.apache.nifi.json.JsonTreeReader",
+            "properties": {},
+        })
+        controller_services.append({
+            "identifier": _uid(),
+            "name": "JsonRecordSetWriter",
+            "type": "org.apache.nifi.json.JsonRecordSetWriter",
+            "properties": {"Schema Write Strategy": "Do Not Write Schema"},
+        })
+
+    flow = {
+        "flowContents": {
+            "identifier": _uid(),
+            "name": f"Openflow_{template}_{dest_table}",
+            "comments": f"Generated by FLUX Data Forge — {template} pipeline to {dest_db}.{dest_schema}.{dest_table}",
+            "processors": processors,
+            "connections": connections,
+            "controllerServices": controller_services,
+            "processGroups": [],
+            "inputPorts": [],
+            "outputPorts": [],
+            "funnels": [],
+            "labels": [],
+        },
+        "snapshotMetadata": {
+            "flowIdentifier": _uid(),
+            "version": 1,
+            "comments": f"Openflow {template} flow — auto-generated",
+        },
+    }
+
+    return flow
 
 
 @app.post("/api/openflow/generate")
@@ -12018,7 +12352,20 @@ async def openflow_generate(request: Request):
         sql_parts.append(f"--   5. Verify controllers, then start the flow")
 
         sql = "\n".join(sql_parts)
-        return {"sql": sql}
+
+        # Build NiFi-importable flow JSON
+        flow_json = build_flow_json(template, {
+            "dest_db": dest_db,
+            "dest_schema": dest_schema,
+            "dest_table": dest_table,
+            "dest_method": dest_method,
+            "transforms": transforms,
+            "eai_name": eai_name,
+            "eai_hosts": eai_hosts,
+            "secret_name": secret_name,
+        })
+
+        return {"sql": sql, "flow_json": flow_json}
 
     except Exception as e:
         return {"error": str(e)}
