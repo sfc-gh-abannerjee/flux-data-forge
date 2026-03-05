@@ -877,6 +877,203 @@ def eventhub_streaming_worker(job_id: str, config: dict):
 
 
 # ============================================================================
+# GENERATE DATA → AZURE EVENTHUB PRODUCER WORKER
+# ============================================================================
+
+def eventhub_producer_worker(job_id: str, config: dict):
+    """
+    Background worker: generate synthetic AMI data → produce to Azure EventHub.
+    Reuses the same data generation logic as snowpipe_streaming_worker but sends
+    events to EventHub via EventHubProducerClient instead of writing to Snowflake.
+    """
+    global active_streaming_jobs
+
+    eh_conn_str = config.get('eh_conn_str', '')
+    eh_name = config.get('eh_name', '')
+    meters = config.get('meters', 1000)
+    rows_per_sec = config.get('rows_per_sec', 100)
+    batch_size = config.get('batch_size', 100)
+    service_area = config.get('service_area', 'TEXAS_GULF_COAST')
+    emission_pattern = config.get('emission_pattern', 'STAGGERED_REALISTIC')
+    data_format = config.get('data_format', 'standard')
+
+    logger.info(f"[{job_id}] Starting EventHub Producer worker: hub={eh_name}, "
+                f"{meters} meters, {rows_per_sec} rows/sec, batch_size={batch_size}")
+
+
+    with streaming_lock:
+        if job_id in active_streaming_jobs:
+            active_streaming_jobs[job_id]['status'] = 'RUNNING'
+            active_streaming_jobs[job_id]['stats'] = {
+                'total_rows': 0, 'batches_sent': 0, 'errors': 0,
+                'consecutive_errors': 0, 'last_error': '',
+                'start_time': datetime.now(), 'last_batch_time': None,
+                'mechanism': 'eventhub_producer', 'source': 'eventhub_produce',
+                'batch_latencies': [], 'peak_rps': 0,
+            }
+
+    producer = None
+    try:
+        from azure.eventhub import EventHubProducerClient, EventData
+
+        # Strip EntityPath from connection string if present — pass hub name separately
+        conn_str_clean = eh_conn_str
+        if 'EntityPath=' in conn_str_clean:
+            parts = [p for p in conn_str_clean.split(';') if not p.startswith('EntityPath=')]
+            conn_str_clean = ';'.join(parts)
+            if not conn_str_clean.endswith(';'):
+                conn_str_clean += ';'
+
+        producer = EventHubProducerClient.from_connection_string(
+            conn_str=conn_str_clean,
+            eventhub_name=eh_name,
+        )
+        logger.info(f"[{job_id}] Connected to EventHub producer: {eh_name}")
+
+        # Build meter fleet (synthetic)
+        meter_fleet = []
+        for i in range(meters):
+            segment = 'INDUSTRIAL' if i % 10 == 1 else ('COMMERCIAL' if i % 10 == 0 else 'RESIDENTIAL')
+            meter_fleet.append({
+                'meter_id': f'MTR-{service_area[:3]}-{i:06d}',
+                'transformer_id': f'XFMR-{service_area[:3]}-{i // 10:05d}',
+                'circuit_id': f'CIRCUIT-{service_area[:3]}-{i // 100:04d}',
+                'substation_id': f'SUB-{service_area[:3]}-{i // 1000:03d}',
+                'customer_segment': segment,
+                'latitude': 29.7604 + random.uniform(-0.5, 0.5),
+                'longitude': -95.3698 + random.uniform(-0.5, 0.5),
+                'production_matched': False,
+            })
+
+        # Grid topology state
+        grid_state = GridTopologyState()
+        for m in meter_fleet:
+            grid_state.register_meter(m)
+        topo = grid_state.summary()
+        logger.info(f"[{job_id}] Grid topology: {topo['substations_total']} substations, "
+                    f"{topo['circuits_total']} circuits, {topo['transformers_total']} transformers")
+
+        batch_interval = batch_size / max(rows_per_sec, 1)
+        batch_counter = 0
+
+        while True:
+            with streaming_lock:
+                if job_id not in active_streaming_jobs:
+                    logger.info(f"[{job_id}] Job removed, stopping producer")
+                    break
+                if active_streaming_jobs[job_id]['status'] == 'STOPPING':
+                    logger.info(f"[{job_id}] Stop requested")
+                    active_streaming_jobs[job_id]['status'] = 'STOPPED'
+                    break
+
+            try:
+                grid_state.tick()
+
+                # Generate batch of readings
+                batch = []
+                for _ in range(min(batch_size, len(meter_fleet))):
+                    meter = random.choice(meter_fleet)
+                    if data_format == 'itron_grid_planning':
+                        reading = generate_itron_grid_planning_row(
+                            meter, service_area, grid_state=grid_state)
+                    elif data_format == 'symphony_iris':
+                        reading = generate_symphony_iris_row(
+                            meter, service_area, grid_state=grid_state)
+                    elif data_format == 'carto_spatial':
+                        reading = generate_carto_spatial_row(
+                            meter, service_area, grid_state=grid_state)
+                    elif data_format == 'siemens_edge':
+                        reading = generate_siemens_edge_row(
+                            meter, service_area, grid_state=grid_state)
+                    else:
+                        reading = generate_ami_reading(
+                            meter, service_area, emission_pattern,
+                            grid_state=grid_state)
+                    batch.append(reading)
+
+                if not batch:
+                    time.sleep(max(batch_interval, 0.1))
+                    continue
+
+                batch_counter += 1
+
+                # Send batch as EventHub events
+                batch_start = time.time()
+                event_data_batch = producer.create_batch()
+                for row in batch:
+                    event_json = json.dumps(row, default=str)
+                    try:
+                        event_data_batch.add(EventData(event_json))
+                    except ValueError:
+                        # Batch full — send what we have and start a new one
+                        producer.send_batch(event_data_batch)
+                        event_data_batch = producer.create_batch()
+                        event_data_batch.add(EventData(event_json))
+                producer.send_batch(event_data_batch)
+                batch_latency_ms = (time.time() - batch_start) * 1000
+
+                with streaming_lock:
+                    if job_id in active_streaming_jobs:
+                        s = active_streaming_jobs[job_id]['stats']
+                        s['total_rows'] += len(batch)
+                        s['batches_sent'] += 1
+                        s['last_batch_time'] = datetime.now()
+                        lats = s.get('batch_latencies', [])
+                        lats.append(batch_latency_ms)
+                        if len(lats) > 1000:
+                            lats = lats[-1000:]
+                        s['batch_latencies'] = lats
+                        elapsed = (datetime.now() - s['start_time']).total_seconds() or 1
+                        rps = s['total_rows'] / elapsed
+                        if rps > s.get('peak_rps', 0):
+                            s['peak_rps'] = rps
+                        s['grid_topology'] = grid_state.summary()
+                        s['consecutive_errors'] = 0
+
+                if batch_counter % 10 == 0 or batch_counter == 1:
+                    logger.info(f"[{job_id}] Produced {len(batch)} events to EventHub "
+                                f"(batch {batch_counter}, {batch_latency_ms:.0f}ms)")
+
+            except Exception as e:
+                logger.error(f"[{job_id}] EventHub producer error: {e}")
+                with streaming_lock:
+                    if job_id in active_streaming_jobs:
+                        s = active_streaming_jobs[job_id]['stats']
+                        s['errors'] += 1
+                        s['consecutive_errors'] = s.get('consecutive_errors', 0) + 1
+                        s['last_error'] = str(e)
+                        if s['consecutive_errors'] >= 10:
+                            logger.error(f"[{job_id}] Too many consecutive errors, stopping")
+                            active_streaming_jobs[job_id]['status'] = 'STOPPED'
+                            break
+
+            time.sleep(max(batch_interval, 0.01))
+
+    except ImportError:
+        logger.error(f"[{job_id}] azure-eventhub not installed. pip install azure-eventhub")
+        with streaming_lock:
+            if job_id in active_streaming_jobs:
+                active_streaming_jobs[job_id]['status'] = 'ERROR'
+                active_streaming_jobs[job_id]['stats']['last_error'] = 'azure-eventhub not installed'
+    except Exception as e:
+        logger.error(f"[{job_id}] EventHub producer fatal error: {e}")
+        with streaming_lock:
+            if job_id in active_streaming_jobs:
+                active_streaming_jobs[job_id]['status'] = 'ERROR'
+                active_streaming_jobs[job_id]['stats']['last_error'] = str(e)
+    finally:
+        if producer:
+            try:
+                producer.close()
+            except Exception:
+                pass
+        with streaming_lock:
+            if job_id in active_streaming_jobs and active_streaming_jobs[job_id]['status'] == 'RUNNING':
+                active_streaming_jobs[job_id]['status'] = 'STOPPED'
+        logger.info(f"[{job_id}] EventHub producer worker finished")
+
+
+# ============================================================================
 # PUBSUB → SNOWFLAKE STREAMING WORKER (Main App)
 # ============================================================================
 
@@ -2970,7 +3167,7 @@ def get_base_styles():
             50% { opacity: 0.5; box-shadow: 0 0 12px rgba(34, 197, 94, 0.8); }
         }
         .status-label { color: var(--color-text-muted); }
-        .status-value { color: var(--color-text-primary); font-weight: 500; }
+        .status-value { color: var(--color-text-primary); font-weight: 500; user-select: text; -webkit-user-select: text; cursor: text; }
         
         .tabs {
             display: flex;
@@ -3952,9 +4149,9 @@ def get_status_bar_html():
         auth_badge = ""
 
     disconnect_btn = (
-        '<button onclick="fluxDisconnect()" style="margin-left:auto;padding:4px 12px;'
+        '<button onclick="fluxDisconnect()" style="margin-left:auto;flex-shrink:0;padding:3px 10px;'
         'border:1px solid rgba(248,113,113,0.4);border-radius:6px;background:transparent;'
-        'color:#f87171;font-size:0.8125rem;cursor:pointer;transition:all 0.15s;" '
+        'color:#f87171;font-size:0.75rem;cursor:pointer;transition:all 0.15s;" '
         'onmouseover="this.style.background=&quot;rgba(248,113,113,0.1)&quot;" '
         'onmouseout="this.style.background=&quot;transparent&quot;">Disconnect</button>'
         '<script>function fluxDisconnect(){if(!confirm("Disconnect from Snowflake?"))return;'
@@ -3962,11 +4159,12 @@ def get_status_bar_html():
     ) if connected else ''
 
     return f"""
-    <div class="status-bar" id="flux-status-bar">
+    <div class="status-bar" id="flux-status-bar" style="padding:8px 14px;">
         <div class="status-item">
             <div class="{dot_class}" id="sb-dot"></div>
             <span class="status-value" id="sb-label">{label}</span>
             <span id="sb-auth">{auth_badge}</span>
+            <span id="sb-password-warning" style="display:{'inline-flex' if connected and _connection_params.get('auth_mode', 'password') != 'keypair' else 'none'};align-items:center;gap:4px;padding:2px 8px;border-radius:4px;font-size:0.7rem;font-weight:500;background:rgba(245,158,11,0.08);color:#f59e0b;border:1px solid rgba(245,158,11,0.18);">&#x26a0; Streaming limited to SQL INSERT &mdash; switch to Key-Pair for SDK</span>
         </div>
         <div class="status-item">
             <span class="status-label">Account:</span>
@@ -4019,6 +4217,8 @@ def get_status_bar_html():
                             + 'background:rgba(245,158,11,0.12);color:#fbbf24;border:1px solid rgba(245,158,11,0.25);">'
                             + '&#x1f512; Password</span>';
                     }}
+                    const pwWarn = document.getElementById('sb-password-warning');
+                    if (pwWarn) pwWarn.style.display = d.auth_mode === 'keypair' ? 'none' : 'inline-flex';
                 }} else {{
                     dot.className = 'status-dot disconnected';
                     lbl.textContent = 'Not Connected';
@@ -4026,6 +4226,8 @@ def get_status_bar_html():
                     ['sb-account','sb-user','sb-role','sb-wh','sb-target'].forEach(
                         id => {{ const el = document.getElementById(id); if(el) el.textContent = '---'; }}
                     );
+                    const pwWarn = document.getElementById('sb-password-warning');
+                    if (pwWarn) pwWarn.style.display = 'none';
                 }}
             }}).catch(() => {{}});
         }}
@@ -4215,25 +4417,28 @@ def _get_connection_modal_html():
 
           <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
             <label style="font-size:0.78rem;color:var(--color-text-muted);font-weight:500;">Role
-              <input name="role" id="conn-role" value="" placeholder="User default" style="
+              <input name="role" id="conn-role" list="dl-roles" value="" placeholder="User default" autocomplete="off" style="
                 width:100%;margin-top:4px;padding:10px 12px;background:var(--color-bg-primary);
                 border:1px solid var(--color-border);border-radius:var(--radius-sm);
                 color:var(--color-text-primary);font-size:0.82rem;box-sizing:border-box;
               ">
+              <datalist id="dl-roles"></datalist>
             </label>
             <label style="font-size:0.78rem;color:var(--color-text-muted);font-weight:500;">Warehouse
-              <input name="warehouse" id="conn-warehouse" value="" placeholder="User default" style="
+              <input name="warehouse" id="conn-warehouse" list="dl-warehouses" value="" placeholder="User default" autocomplete="off" style="
                 width:100%;margin-top:4px;padding:10px 12px;background:var(--color-bg-primary);
                 border:1px solid var(--color-border);border-radius:var(--radius-sm);
                 color:var(--color-text-primary);font-size:0.82rem;box-sizing:border-box;
               ">
+              <datalist id="dl-warehouses"></datalist>
             </label>
             <label style="font-size:0.78rem;color:var(--color-text-muted);font-weight:500;">Database
-              <input name="database" id="conn-database" value="FLUX_DB" placeholder="FLUX_DB" style="
+              <input name="database" id="conn-database" list="dl-databases" value="FLUX_DB" placeholder="FLUX_DB" autocomplete="off" style="
                 width:100%;margin-top:4px;padding:10px 12px;background:var(--color-bg-primary);
                 border:1px solid var(--color-border);border-radius:var(--radius-sm);
                 color:var(--color-text-primary);font-size:0.82rem;box-sizing:border-box;
               ">
+              <datalist id="dl-databases"></datalist>
             </label>
           </div>
 
@@ -4268,6 +4473,33 @@ def _get_connection_modal_html():
     </div>
 
     <script>
+    // ── Datalist helper for session-context dropdowns ─────────────
+    function populateDatalist(dlId, items) {
+        const dl = document.getElementById(dlId);
+        if (!dl) return;
+        dl.innerHTML = '';
+        items.forEach(v => { const o = document.createElement('option'); o.value = v; dl.appendChild(o); });
+    }
+    function fetchSessionOptions(formOrName) {
+        let body;
+        if (typeof formOrName === 'string') {
+            // Saved connection name — send as form data with just the name
+            body = new FormData();
+            body.append('connection_name', formOrName);
+        } else {
+            body = new FormData(formOrName);
+        }
+        fetch('/api/session-options', { method: 'POST', body })
+            .then(r => r.json())
+            .then(d => {
+                if (d.status !== 'ok') return;
+                populateDatalist('dl-roles', d.roles || []);
+                populateDatalist('dl-warehouses', d.warehouses || []);
+                populateDatalist('dl-databases', d.databases || []);
+            })
+            .catch(() => {});
+    }
+
     // ── Auth mode toggle ───────────────────────────────────────────
     function setAuthMode(mode) {
         document.getElementById('conn-auth-mode').value = mode;
@@ -4374,6 +4606,9 @@ def _get_connection_modal_html():
                     whEl.placeholder = 'User default';
                 });
         }
+
+        // Populate datalists with available roles/warehouses/databases
+        fetchSessionOptions(name);
     }
 
     // ── Test Connection ─────────────────────────────────────────────
@@ -4414,6 +4649,8 @@ def _get_connection_modal_html():
                     + ' &nbsp;' + authBadge
                     + '</div></div>';
                 okEl.style.display = 'block';
+                // Populate datalists so user can adjust role/warehouse/database before connecting
+                fetchSessionOptions(document.getElementById('conn-form'));
             } else {
                 errEl.textContent = data.message || 'Test failed';
                 errEl.style.display = 'block';
@@ -4469,6 +4706,7 @@ def get_tabs_html(active_tab: str):
         ('monitor', 'monitoring', 'Monitor'),
         ('validate', 'check_circle', 'Validate'),
         ('history', 'history', 'History'),
+        ('openflow', 'account_tree', 'Openflow'),
     ]
     html = '<div class="tabs">'
     for tab_id, icon, label in tabs:
@@ -4685,6 +4923,80 @@ async def api_test_connection(
         return JSONResponse({"status": "error", "message": str(e)[:300]})
 
 
+@app.post("/api/test-eventhub")
+async def api_test_eventhub(
+    conn_str: str = Form(""),
+    hub_name: str = Form(""),
+    mode: str = Form("consume"),
+):
+    """Test connectivity to Azure EventHub (consume or produce mode)."""
+    import base64 as _b64
+    if conn_str.startswith('b64:'):
+        try:
+            conn_str = _b64.b64decode(conn_str[4:]).decode('utf-8')
+        except Exception:
+            return JSONResponse({"status": "error", "message": "Invalid base64-encoded connection string"})
+    if not conn_str or not hub_name:
+        return JSONResponse({"status": "error", "message": "Connection string and EventHub name are required"})
+    try:
+        if mode == 'produce':
+            from azure.eventhub import EventHubProducerClient
+            conn_str_clean = conn_str
+            if 'EntityPath=' in conn_str_clean:
+                parts = [p for p in conn_str_clean.split(';') if not p.startswith('EntityPath=')]
+                conn_str_clean = ';'.join(parts)
+                if not conn_str_clean.endswith(';'):
+                    conn_str_clean += ';'
+            producer = EventHubProducerClient.from_connection_string(
+                conn_str=conn_str_clean, eventhub_name=hub_name)
+            props = producer.get_eventhub_properties()
+            producer.close()
+            return JSONResponse({
+                "status": "ok",
+                "message": f"Connected to EventHub '{props['name']}' ({len(props.get('partition_ids', []))} partitions)"
+            })
+        else:
+            from azure.eventhub import EventHubConsumerClient
+            consumer = EventHubConsumerClient.from_connection_string(
+                conn_str=conn_str, consumer_group="$Default", eventhub_name=hub_name)
+            props = consumer.get_eventhub_properties()
+            consumer.close()
+            return JSONResponse({
+                "status": "ok",
+                "message": f"Connected to EventHub '{props['name']}' ({len(props.get('partition_ids', []))} partitions)"
+            })
+    except ImportError:
+        return JSONResponse({"status": "error", "message": "azure-eventhub package not installed. Run: pip install azure-eventhub"})
+    except Exception as e:
+        logger.warning(f"EventHub test connection failed: {e}")
+        return JSONResponse({"status": "error", "message": str(e)[:300]})
+
+
+@app.post("/api/test-pubsub")
+async def api_test_pubsub(
+    project_id: str = Form(""),
+    subscription_name: str = Form(""),
+):
+    """Test connectivity to Google Cloud Pub/Sub subscription."""
+    if not project_id or not subscription_name:
+        return JSONResponse({"status": "error", "message": "Project ID and Subscription Name are required"})
+    try:
+        from google.cloud import pubsub_v1
+        subscriber = pubsub_v1.SubscriberClient()
+        subscription_path = subscriber.subscription_path(project_id, subscription_name)
+        sub = subscriber.get_subscription(request={"subscription": subscription_path})
+        subscriber.close()
+        return JSONResponse({
+            "status": "ok",
+            "message": f"Subscription '{subscription_name}' found (topic: {sub.topic.split('/')[-1]})"
+        })
+    except ImportError:
+        return JSONResponse({"status": "error", "message": "google-cloud-pubsub package not installed. Run: pip install google-cloud-pubsub"})
+    except Exception as e:
+        logger.warning(f"Pub/Sub test connection failed: {e}")
+        return JSONResponse({"status": "error", "message": str(e)[:300]})
+
+
 @app.get("/api/resolve-defaults/{connection_name}")
 async def api_resolve_defaults(connection_name: str):
     """Quick probe: connect using saved TOML creds and return the resolved role/warehouse/database."""
@@ -4705,6 +5017,63 @@ async def api_resolve_defaults(connection_name: str):
             "database": str(row[2]) if row[2] else "",
         })
     except Exception:
+        return JSONResponse({"status": "error"})
+
+
+@app.post("/api/session-options")
+async def api_session_options(
+    account: str = Form(""),
+    user: str = Form(""),
+    password: str = Form(""),
+    private_key: str = Form(""),
+    auth_mode: str = Form("password"),
+    role: str = Form(""),
+    warehouse: str = Form(""),
+    database: str = Form(""),
+    connection_name: str = Form(""),
+):
+    """Probe Snowflake for available roles, warehouses, and databases.
+
+    Creates an ephemeral session, queries metadata, and closes immediately.
+    Only returns object names the authenticated user can see — no privilege escalation.
+    """
+    try:
+        creds, err = _resolve_connection_params(
+            account, user, password, private_key, auth_mode, role, warehouse, database, connection_name)
+        if err:
+            return JSONResponse({"status": "error"})
+        probe = Session.builder.configs(creds).create()
+        _activate_warehouse(probe, creds.get('warehouse', ''))
+
+        cur_row = probe.sql(
+            "SELECT CURRENT_ROLE(), CURRENT_WAREHOUSE(), CURRENT_DATABASE()"
+        ).collect()[0]
+
+        roles = sorted(
+            r.asDict().get('name', r['name']) if hasattr(r, 'asDict') else r['name']
+            for r in probe.sql("SHOW ROLES").collect()
+        )
+        warehouses = sorted(
+            r.asDict().get('name', r['name']) if hasattr(r, 'asDict') else r['name']
+            for r in probe.sql("SHOW WAREHOUSES").collect()
+        )
+        databases = sorted(
+            r.asDict().get('name', r['name']) if hasattr(r, 'asDict') else r['name']
+            for r in probe.sql("SHOW DATABASES").collect()
+        )
+        probe.close()
+
+        return JSONResponse({
+            "status": "ok",
+            "roles": roles,
+            "warehouses": warehouses,
+            "databases": databases,
+            "current_role": str(cur_row[0]) if cur_row[0] else "",
+            "current_warehouse": str(cur_row[1]) if cur_row[1] else "",
+            "current_database": str(cur_row[2]) if cur_row[2] else "",
+        })
+    except Exception as e:
+        logger.warning(f"session-options probe failed: {e}")
         return JSONResponse({"status": "error"})
 
 
@@ -5135,11 +5504,19 @@ async def generate_page(
                 '<p style="color: #94a3b8; font-size: 0.9375rem; margin-bottom: 16px;">'
                 'HP Streaming requires a PIPE object with <code style="color: #f59e0b; background: rgba(245,158,11,0.1); padding: 2px 6px; border-radius: 4px;">DATA_SOURCE(TYPE =&gt; \'STREAMING\')</code>. '
                 'Verify or create the pipe below.</p>'
-                '<div style="display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: end; margin-bottom: 16px;">'
+                '<div style="display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: end; margin-bottom: 8px;">'
                 '<div class="form-group" style="margin-bottom:0;">'
                 '<label class="form-label">PIPE Name</label>'
-                '<input type="text" id="hp_pipe_name" value="AMI_STREAMING_PIPE" placeholder="PIPE name" '
-                'oninput="document.getElementById(\'form_pipe_name\').value = this.value;">'
+                '<select id="hp_pipe_name" onchange="document.getElementById(\'form_pipe_name\').value = this.value; syncStreamFields();" style="width:100%;">'
+                '<option value="">Loading pipes...</option>'
+                '</select>'
+                '<input type="text" id="hp_pipe_name_new" placeholder="Enter new PIPE name" '
+                'oninput="document.getElementById(\'form_pipe_name\').value = this.value;" '
+                'style="display:none; margin-top: 6px;">'
+                '<label class="checkbox-row" style="margin-top: var(--space-sm); cursor: pointer;">'
+                '<input type="checkbox" id="hp_pipe_create_new" onchange="togglePipeNewInput()">'
+                '<span class="checkbox-label">Create new PIPE</span>'
+                '</label>'
                 '</div>'
                 '<div style="display:flex;align-items:center;gap:8px;">'
                 '<button type="button" class="btn-secondary" onclick="checkOrCreateHpPipe()" '
@@ -5316,24 +5693,56 @@ async def generate_page(
         
         <div class="section-header">
             <span class="section-num">{'7' if mechanism == 'snowpipe_hp' and dest != 'stage' else '6'}</span>
-            Data Source
+            Streaming Input
         </div>
         <p style="color: #94a3b8; font-size: 0.9375rem; margin-bottom: 16px;">
-            Select where streaming data originates from.
+            Choose how data enters the pipeline &mdash; generate it locally or consume from a cloud message bus.
         </p>
         <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px;">
-            <button type="button" class="btn-secondary streaming-src-btn active" data-src="test"
-                    onclick="setStreamSource('test')" style="font-size: 0.85rem; padding: 8px 16px;">
-                {get_material_icon('science', '14px')} Test Data
+            <button type="button" class="btn-secondary streaming-src-btn active" data-src="test" data-color="#a78bfa"
+                    onclick="setStreamSource('test')"
+                    style="font-size: 0.85rem; padding: 10px 18px; border-left: 3px solid #a78bfa; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 140px;">
+                <span style="display:flex;align-items:center;gap:6px;">{get_material_icon('science', '16px', '#a78bfa')} Generate Locally</span>
+                <span style="font-size: 0.7rem; color: #94a3b8; font-weight: 400;">Synthetic AMI data</span>
             </button>
-            <button type="button" class="btn-secondary streaming-src-btn" data-src="eventhub"
-                    onclick="setStreamSource('eventhub')" style="font-size: 0.85rem; padding: 8px 16px;">
-                {get_material_icon('cloud_queue', '14px')} Azure EventHub
+            <button type="button" class="btn-secondary streaming-src-btn" data-src="eventhub" data-color="#38bdf8"
+                    onclick="setStreamSource('eventhub')"
+                    style="font-size: 0.85rem; padding: 10px 18px; border-left: 3px solid #38bdf8; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 140px;">
+                <span style="display:flex;align-items:center;gap:6px;">{get_material_icon('cloud_download', '16px', '#38bdf8')} Consume EventHub</span>
+                <span style="font-size: 0.7rem; color: #94a3b8; font-weight: 400;">Azure &rarr; Snowflake</span>
             </button>
-            <button type="button" class="btn-secondary streaming-src-btn" data-src="pubsub"
-                    onclick="setStreamSource('pubsub')" style="font-size: 0.85rem; padding: 8px 16px;">
-                {get_material_icon('cloud', '14px')} Google PubSub
+            <button type="button" class="btn-secondary streaming-src-btn" data-src="eventhub_produce" data-color="#f59e0b"
+                    onclick="setStreamSource('eventhub_produce')"
+                    style="font-size: 0.85rem; padding: 10px 18px; border-left: 3px solid #f59e0b; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 140px;">
+                <span style="display:flex;align-items:center;gap:6px;">{get_material_icon('cloud_upload', '16px', '#f59e0b')} Publish to EventHub</span>
+                <span style="font-size: 0.7rem; color: #94a3b8; font-weight: 400;">Generate &rarr; Azure</span>
             </button>
+            <button type="button" class="btn-secondary streaming-src-btn" data-src="pubsub" data-color="#4ade80"
+                    onclick="setStreamSource('pubsub')"
+                    style="font-size: 0.85rem; padding: 10px 18px; border-left: 3px solid #4ade80; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 140px;">
+                <span style="display:flex;align-items:center;gap:6px;">{get_material_icon('cloud_download', '16px', '#4ade80')} Consume Pub/Sub</span>
+                <span style="font-size: 0.7rem; color: #94a3b8; font-weight: 400;">Google Cloud &rarr; Snowflake</span>
+            </button>
+        </div>
+        <!-- EventHub Producer fields -->
+        <div id="eventhub_produce_fields" style="display:none; margin-bottom: 12px;">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                <div class="form-group">
+                    <label class="form-label">Connection String</label>
+                    <input type="text" id="eh_produce_conn_str" placeholder="Endpoint=sb://..." oninput="syncStreamFields()">
+                </div>
+                <div class="form-group">
+                    <label class="form-label">EventHub Name</label>
+                    <input type="text" id="eh_produce_name" placeholder="e.g. centerpoint" oninput="syncStreamFields()">
+                </div>
+            </div>
+            <div style="margin-top: 8px; display: flex; align-items: center; gap: 10px;">
+                <button type="button" onclick="testEventHubProduce()" id="btn_test_eh_produce"
+                    style="padding: 6px 16px; border-radius: 6px; border: 1px solid #f59e0b; background: rgba(245,158,11,0.1); color: #f59e0b; font-size: 0.85rem; cursor: pointer;">
+                    Test Connection
+                </button>
+                <span id="eh_produce_test_status" style="font-size: 0.85rem;"></span>
+            </div>
         </div>
         <!-- EventHub fields -->
         <div id="eventhub_fields" style="display:none; margin-bottom: 12px;">
@@ -5351,6 +5760,13 @@ async def generate_page(
                 <label class="form-label">Consumer Group</label>
                 <input type="text" id="eh_consumer_group" value="$Default" placeholder="Consumer Group" oninput="syncStreamFields()">
             </div>
+            <div style="margin-top: 8px; display: flex; align-items: center; gap: 10px;">
+                <button type="button" onclick="testEventHubConsume()" id="btn_test_eh_consume"
+                    style="padding: 6px 16px; border-radius: 6px; border: 1px solid #38bdf8; background: rgba(56,189,248,0.1); color: #38bdf8; font-size: 0.85rem; cursor: pointer;">
+                    Test Connection
+                </button>
+                <span id="eh_consume_test_status" style="font-size: 0.85rem;"></span>
+            </div>
         </div>
         <!-- PubSub fields -->
         <div id="pubsub_fields" style="display:none; margin-bottom: 12px;">
@@ -5364,10 +5780,154 @@ async def generate_page(
                     <input type="text" id="ps_subscription" placeholder="Subscription Name" oninput="syncStreamFields()">
                 </div>
             </div>
+            <div style="margin-top: 8px; display: flex; align-items: center; gap: 10px;">
+                <button type="button" onclick="testPubSub()" id="btn_test_pubsub"
+                    style="padding: 6px 16px; border-radius: 6px; border: 1px solid #4ade80; background: rgba(74,222,128,0.1); color: #4ade80; font-size: 0.85rem; cursor: pointer;">
+                    Test Connection
+                </button>
+                <span id="pubsub_test_status" style="font-size: 0.85rem;"></span>
+            </div>
         </div>
         
         
         <script>
+        // Toggle PIPE name between dropdown and manual text input
+        function togglePipeNewInput() {{
+            const checkbox = document.getElementById('hp_pipe_create_new');
+            const selectEl = document.getElementById('hp_pipe_name');
+            const newInput = document.getElementById('hp_pipe_name_new');
+            const formPipe = document.getElementById('form_pipe_name');
+            if (checkbox && checkbox.checked) {{
+                if (selectEl) selectEl.style.display = 'none';
+                if (newInput) {{ newInput.style.display = 'block'; newInput.value = ''; }}
+                if (formPipe) formPipe.value = '';
+            }} else {{
+                if (selectEl) selectEl.style.display = 'block';
+                if (newInput) newInput.style.display = 'none';
+                if (formPipe) formPipe.value = selectEl ? selectEl.value : '';
+            }}
+        }}
+
+        // Fetch pipes for the currently selected database/schema and populate the PIPE dropdown
+        async function loadStreamPipes() {{
+            const dbEl = document.getElementById('stream_sf_database');
+            const schemaEl = document.getElementById('stream_sf_schema');
+            const selectEl = document.getElementById('hp_pipe_name');
+            if (!dbEl || !schemaEl || !selectEl) return;
+            const db = dbEl.value;
+            const schema = schemaEl.value;
+            if (!db || !schema) {{
+                selectEl.innerHTML = '<option value="">Select target first</option>';
+                return;
+            }}
+            selectEl.innerHTML = '<option value="">Loading pipes...</option>';
+            try {{
+                const resp = await fetch(`/api/pipes/${{encodeURIComponent(db)}}/${{encodeURIComponent(schema)}}`);
+                const data = await resp.json();
+                const pipes = data.pipes || [];
+                selectEl.innerHTML = '';
+                if (pipes.length === 0) {{
+                    selectEl.innerHTML = '<option value="">No pipes found — create one below</option>';
+                }} else {{
+                    selectEl.innerHTML = '<option value="">-- Select PIPE --</option>';
+                    pipes.forEach(name => {{
+                        const opt = document.createElement('option');
+                        opt.value = name;
+                        opt.textContent = name;
+                        selectEl.appendChild(opt);
+                    }});
+                }}
+                // Auto-select if there's only one pipe
+                if (pipes.length === 1) {{
+                    selectEl.value = pipes[0];
+                    if (document.getElementById('form_pipe_name')) {{
+                        document.getElementById('form_pipe_name').value = pipes[0];
+                    }}
+                }}
+            }} catch (e) {{
+                console.error('Failed to load pipes:', e);
+                selectEl.innerHTML = '<option value="">Error loading pipes</option>';
+            }}
+        }}
+
+        // ── Test Connection helpers ──
+        async function testEventHubProduce() {{
+            const connStr = document.getElementById('eh_produce_conn_str')?.value || '';
+            const hubName = document.getElementById('eh_produce_name')?.value || '';
+            const statusEl = document.getElementById('eh_produce_test_status');
+            const btn = document.getElementById('btn_test_eh_produce');
+            if (!connStr || !hubName) {{ statusEl.innerHTML = '<span style="color:#f87171;">Fill in both fields first</span>'; return; }}
+            btn.disabled = true; btn.textContent = 'Testing...';
+            statusEl.innerHTML = '<span style="color:#94a3b8;">Connecting...</span>';
+            try {{
+                const body = new FormData();
+                body.append('conn_str', 'b64:' + btoa(connStr));
+                body.append('hub_name', hubName);
+                body.append('mode', 'produce');
+                const resp = await fetch('/api/test-eventhub', {{ method: 'POST', body }});
+                const data = await resp.json();
+                if (data.status === 'ok') {{
+                    statusEl.innerHTML = '<span style="color:#4ade80;">&#10003; ' + data.message + '</span>';
+                }} else {{
+                    statusEl.innerHTML = '<span style="color:#f87171;">&#10007; ' + data.message + '</span>';
+                }}
+            }} catch (e) {{
+                statusEl.innerHTML = '<span style="color:#f87171;">&#10007; Network error</span>';
+            }}
+            btn.disabled = false; btn.textContent = 'Test Connection';
+        }}
+
+        async function testEventHubConsume() {{
+            const connStr = document.getElementById('eh_conn_str')?.value || '';
+            const hubName = document.getElementById('eh_name')?.value || '';
+            const statusEl = document.getElementById('eh_consume_test_status');
+            const btn = document.getElementById('btn_test_eh_consume');
+            if (!connStr || !hubName) {{ statusEl.innerHTML = '<span style="color:#f87171;">Fill in both fields first</span>'; return; }}
+            btn.disabled = true; btn.textContent = 'Testing...';
+            statusEl.innerHTML = '<span style="color:#94a3b8;">Connecting...</span>';
+            try {{
+                const body = new FormData();
+                body.append('conn_str', 'b64:' + btoa(connStr));
+                body.append('hub_name', hubName);
+                body.append('mode', 'consume');
+                const resp = await fetch('/api/test-eventhub', {{ method: 'POST', body }});
+                const data = await resp.json();
+                if (data.status === 'ok') {{
+                    statusEl.innerHTML = '<span style="color:#4ade80;">&#10003; ' + data.message + '</span>';
+                }} else {{
+                    statusEl.innerHTML = '<span style="color:#f87171;">&#10007; ' + data.message + '</span>';
+                }}
+            }} catch (e) {{
+                statusEl.innerHTML = '<span style="color:#f87171;">&#10007; Network error</span>';
+            }}
+            btn.disabled = false; btn.textContent = 'Test Connection';
+        }}
+
+        async function testPubSub() {{
+            const projectId = document.getElementById('ps_project')?.value || '';
+            const subName = document.getElementById('ps_subscription')?.value || '';
+            const statusEl = document.getElementById('pubsub_test_status');
+            const btn = document.getElementById('btn_test_pubsub');
+            if (!projectId || !subName) {{ statusEl.innerHTML = '<span style="color:#f87171;">Fill in both fields first</span>'; return; }}
+            btn.disabled = true; btn.textContent = 'Testing...';
+            statusEl.innerHTML = '<span style="color:#94a3b8;">Connecting...</span>';
+            try {{
+                const body = new FormData();
+                body.append('project_id', projectId);
+                body.append('subscription_name', subName);
+                const resp = await fetch('/api/test-pubsub', {{ method: 'POST', body }});
+                const data = await resp.json();
+                if (data.status === 'ok') {{
+                    statusEl.innerHTML = '<span style="color:#4ade80;">&#10003; ' + data.message + '</span>';
+                }} else {{
+                    statusEl.innerHTML = '<span style="color:#f87171;">&#10007; ' + data.message + '</span>';
+                }}
+            }} catch (e) {{
+                statusEl.innerHTML = '<span style="color:#f87171;">&#10007; Network error</span>';
+            }}
+            btn.disabled = false; btn.textContent = 'Test Connection';
+        }}
+
         // Sync main-column inputs to sidebar form hidden fields
         function syncStreamFields() {{
             const f = id => document.getElementById(id);
@@ -5377,9 +5937,21 @@ async def generate_page(
             if (f('form_table')) f('form_table').value = tbl;
             if (f('form_new_table')) f('form_new_table').value = createNew ? (f('stream_new_table')?.value || '') : '';
             // Source fields
-            if (f('form_eh_conn_str')) f('form_eh_conn_str').value = f('eh_conn_str')?.value || '';
-            if (f('form_eh_name')) f('form_eh_name').value = f('eh_name')?.value || '';
-            if (f('form_eh_consumer_group')) f('form_eh_consumer_group').value = f('eh_consumer_group')?.value || '$Default';
+            const srcMode = f('form_stream_source')?.value || 'test';
+            if (srcMode === 'eventhub_produce') {{
+                // Producer mode: copy from producer inputs into the shared hidden fields
+                // Base64-encode the connection string to avoid semicolons being parsed as form delimiters
+                const rawConn = f('eh_produce_conn_str')?.value || '';
+                if (f('form_eh_conn_str')) f('form_eh_conn_str').value = rawConn ? 'b64:' + btoa(rawConn) : '';
+                if (f('form_eh_name')) f('form_eh_name').value = f('eh_produce_name')?.value || '';
+                if (f('form_eh_consumer_group')) f('form_eh_consumer_group').value = '';
+            }} else {{
+                // Consumer mode: also base64-encode the connection string
+                const rawConn = f('eh_conn_str')?.value || '';
+                if (f('form_eh_conn_str')) f('form_eh_conn_str').value = rawConn ? 'b64:' + btoa(rawConn) : '';
+                if (f('form_eh_name')) f('form_eh_name').value = f('eh_name')?.value || '';
+                if (f('form_eh_consumer_group')) f('form_eh_consumer_group').value = f('eh_consumer_group')?.value || '$Default';
+            }}
             if (f('form_ps_project')) f('form_ps_project').value = f('ps_project')?.value || '';
             if (f('form_ps_subscription')) f('form_ps_subscription').value = f('ps_subscription')?.value || '';
             // Update sidebar display
@@ -5392,32 +5964,41 @@ async def generate_page(
             const sourceDisplay = f('sidebar_source_display');
             if (sourceDisplay) {{
                 const srcVal = f('form_stream_source')?.value || 'test';
-                const labels = {{ test: 'Test Data', eventhub: 'Azure EventHub', pubsub: 'Google PubSub' }};
+                const labels = {{ test: 'Generate Locally', eventhub: 'Consume EventHub', eventhub_produce: 'Publish to EventHub', pubsub: 'Consume Pub/Sub' }};
                 sourceDisplay.textContent = labels[srcVal] || srcVal;
             }}
         }}
         function setStreamSource(src) {{
             document.getElementById('form_stream_source').value = src;
             document.querySelectorAll('.streaming-src-btn').forEach(b => {{
+                const catColor = b.dataset.color || '#38bdf8';
                 b.classList.toggle('active', b.dataset.src === src);
                 if (b.dataset.src === src) {{
-                    b.style.background = 'rgba(56,189,248,0.15)';
-                    b.style.color = '#38bdf8';
-                    b.style.borderColor = '#38bdf8';
+                    // Convert hex to rgba for background tint
+                    const r = parseInt(catColor.slice(1,3),16);
+                    const g = parseInt(catColor.slice(3,5),16);
+                    const bl = parseInt(catColor.slice(5,7),16);
+                    b.style.background = `rgba(${{r}},${{g}},${{bl}},0.12)`;
+                    b.style.color = catColor;
+                    b.style.borderColor = catColor;
+                    b.style.borderLeftColor = catColor;
                 }} else {{
                     b.style.background = '';
                     b.style.color = '';
                     b.style.borderColor = '';
+                    b.style.borderLeftColor = catColor;
                 }}
             }});
             document.getElementById('eventhub_fields').style.display = src === 'eventhub' ? '' : 'none';
+            document.getElementById('eventhub_produce_fields').style.display = src === 'eventhub_produce' ? '' : 'none';
             document.getElementById('pubsub_fields').style.display = src === 'pubsub' ? '' : 'none';
-            // Hide test-data-only steps (Behavior/Format + Preview) for external sources
-            const testOnly = (src === 'test');
+            // Hide test-data-only steps (Behavior/Format + Preview) for external consumer sources
+            // but show them for test data and eventhub_produce (which generates data)
+            const showGenSteps = (src === 'test' || src === 'eventhub_produce');
             const s8 = document.getElementById('step-8-section');
             const s9 = document.getElementById('step-9-section');
-            if (s8) s8.style.display = testOnly ? '' : 'none';
-            if (s9) s9.style.display = testOnly ? '' : 'none';
+            if (s8) s8.style.display = showGenSteps ? '' : 'none';
+            if (s9) s9.style.display = showGenSteps ? '' : 'none';
             syncStreamFields();
             if (typeof updateStepAvailability === 'function') updateStepAvailability();
         }}
@@ -5798,7 +6379,7 @@ async def generate_page(
                 ['Configure Fleet', 'step-4-section'],
                 ['Snowflake Target', 'step-5-section'],
                 ['Streaming PIPE', 'step-6-section'],
-                ['Data Source', 'step-7-section'],
+                ['Streaming Input', 'step-7-section'],
                 ['Streaming Behavior', 'step-8-section'],
                 ['Preview Records', 'step-9-section'],
             ];
@@ -5975,11 +6556,13 @@ async def generate_page(
                     wrapSections();
                     wireStepGuard();
                     window.updateStepAvailability();
+                    if (typeof setStreamSource === 'function') setStreamSource('test');
                 }});
             }} else {{
                 wrapSections();
                 wireStepGuard();
                 window.updateStepAvailability();
+                if (typeof setStreamSource === 'function') setStreamSource('test');
             }}
         }})();
         </script>
@@ -6347,7 +6930,7 @@ async def generate_page(
     
     if mode == "streaming":
         preview_content += f'''
-        <form action="/api/stream" method="post" id="streaming_form">
+        <form action="/api/stream" method="post" id="streaming_form" onsubmit="syncStreamFields()">
             <input type="hidden" name="template" value="{template}">
             <input type="hidden" name="fleet" value="{fleet}">
             <input type="hidden" name="mode" value="streaming">
@@ -6381,7 +6964,10 @@ async def generate_page(
             preview_content += f'''
             <script>
             async function checkOrCreateHpPipe() {{
-                const pipeName = document.getElementById('hp_pipe_name').value.trim();
+                const createNewPipe = document.getElementById('hp_pipe_create_new')?.checked;
+                const pipeName = createNewPipe
+                    ? (document.getElementById('hp_pipe_name_new')?.value || '').trim()
+                    : (document.getElementById('hp_pipe_name')?.value || '').trim();
                 const statusEl = document.getElementById('hp_pipe_status');
                 const msgEl = document.getElementById('hp_pipe_msg');
                 const btn = document.getElementById('hp_pipe_btn');
@@ -8054,6 +8640,8 @@ FILE_FORMAT = (TYPE = ${{fileFormat}});`;
                     select.appendChild(opt);
                 }});
                 if (select.value) loadStreamTables();
+                // Refresh PIPE dropdown for new schema
+                if (typeof loadStreamPipes === 'function') loadStreamPipes();
             }} catch (e) {{
                 console.error('Failed to load schemas:', e);
             }}
@@ -10214,6 +10802,1132 @@ async def history_page():
     """
 
 
+@app.get("/openflow", response_class=HTMLResponse)
+async def openflow_page():
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Openflow Designer - FLUX Data Forge</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        {get_base_styles()}
+        <style>
+            .of-badge {{
+                display: inline-block;
+                background: rgba(245,158,11,0.15);
+                color: #f59e0b;
+                font-size: 0.75rem;
+                font-weight: 600;
+                padding: 3px 10px;
+                border-radius: 20px;
+            }}
+            .of-section-header {{
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                margin-bottom: 16px;
+                font-size: 1.15rem;
+                font-weight: 600;
+                color: #f1f5f9;
+            }}
+            .of-section-num {{
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                width: 32px;
+                height: 32px;
+                border-radius: 50%;
+                background: rgba(245,158,11,0.15);
+                color: #f59e0b;
+                font-size: 0.9rem;
+                font-weight: 700;
+                flex-shrink: 0;
+            }}
+            .of-template-grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+                gap: 14px;
+                margin-bottom: 24px;
+            }}
+            .of-template-card {{
+                background: rgba(30,41,59,0.7);
+                border: 1px solid rgba(148,163,184,0.1);
+                border-radius: 10px;
+                padding: 18px;
+                cursor: pointer;
+                transition: all 0.2s;
+                position: relative;
+            }}
+            .of-template-card:hover {{
+                border-color: rgba(245,158,11,0.4);
+                background: rgba(30,41,59,0.9);
+                transform: translateY(-1px);
+            }}
+            .of-template-card.active {{
+                border-color: #f59e0b;
+                background: rgba(245,158,11,0.08);
+                box-shadow: 0 0 0 1px rgba(245,158,11,0.3);
+            }}
+            .of-card-icon {{
+                font-size: 1.6rem;
+                margin-bottom: 8px;
+            }}
+            .of-card-title {{
+                font-size: 1rem;
+                font-weight: 600;
+                color: #f1f5f9;
+                margin-bottom: 4px;
+            }}
+            .of-card-desc {{
+                font-size: 0.85rem;
+                color: #94a3b8;
+                line-height: 1.4;
+                margin-bottom: 10px;
+            }}
+            .of-card-processors {{
+                display: flex;
+                flex-wrap: wrap;
+                gap: 4px;
+            }}
+            .of-proc-tag {{
+                font-size: 0.7rem;
+                padding: 2px 7px;
+                border-radius: 4px;
+                background: rgba(148,163,184,0.1);
+                color: #94a3b8;
+                font-family: 'SF Mono', 'Fira Code', monospace;
+            }}
+            .of-connector-badge {{
+                position: absolute;
+                top: 10px;
+                right: 10px;
+                font-size: 0.65rem;
+                padding: 2px 8px;
+                border-radius: 10px;
+                background: rgba(245,158,11,0.15);
+                color: #f59e0b;
+                font-weight: 600;
+            }}
+            .of-step-section {{
+                margin-top: 24px;
+                padding: 24px;
+                border-radius: 12px;
+                background: rgba(15,23,42,0.5);
+                border: 1px solid rgba(148,163,184,0.08);
+            }}
+            .of-step-locked {{
+                opacity: 0.35;
+                pointer-events: none;
+                position: relative;
+            }}
+            .of-lock-msg {{
+                position: absolute;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                color: #64748b;
+                font-size: 0.9rem;
+                text-align: center;
+                z-index: 2;
+            }}
+            .of-selected-summary {{
+                margin-top: 12px;
+                padding: 12px 16px;
+                border-radius: 8px;
+                background: rgba(245,158,11,0.06);
+                border: 1px solid rgba(245,158,11,0.15);
+                color: #f59e0b;
+                font-size: 0.9rem;
+                display: none;
+            }}
+            .of-toggle-grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+                gap: 12px;
+                margin-top: 12px;
+            }}
+            .of-toggle-card {{
+                display: flex;
+                align-items: flex-start;
+                gap: 12px;
+                padding: 14px;
+                border-radius: 8px;
+                background: rgba(30,41,59,0.5);
+                border: 1px solid rgba(148,163,184,0.08);
+                cursor: pointer;
+                transition: all 0.2s;
+            }}
+            .of-toggle-card:hover {{
+                border-color: rgba(245,158,11,0.3);
+            }}
+            .of-toggle-card.active {{
+                border-color: #f59e0b;
+                background: rgba(245,158,11,0.06);
+            }}
+            .of-toggle-cb {{
+                width: 18px;
+                height: 18px;
+                border-radius: 4px;
+                border: 2px solid rgba(148,163,184,0.3);
+                flex-shrink: 0;
+                margin-top: 2px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                transition: all 0.15s;
+            }}
+            .of-toggle-card.active .of-toggle-cb {{
+                background: #f59e0b;
+                border-color: #f59e0b;
+            }}
+            .of-toggle-title {{
+                font-size: 0.9rem;
+                font-weight: 600;
+                color: #e2e8f0;
+                margin-bottom: 2px;
+            }}
+            .of-toggle-desc {{
+                font-size: 0.8rem;
+                color: #94a3b8;
+                line-height: 1.3;
+            }}
+            .of-dest-form {{
+                display: grid;
+                grid-template-columns: 1fr 1fr 1fr;
+                gap: 14px;
+                margin-top: 12px;
+            }}
+            .of-dest-form label {{
+                display: block;
+                color: #94a3b8;
+                font-size: 0.82rem;
+                margin-bottom: 4px;
+            }}
+            .of-dest-form select, .of-dest-form input {{
+                width: 100%;
+                padding: 9px 12px;
+                border-radius: 6px;
+                border: 1px solid rgba(148,163,184,0.15);
+                background: rgba(15,23,42,0.6);
+                color: #e2e8f0;
+                font-size: 0.9rem;
+            }}
+            .of-dest-row2 {{
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 14px;
+                margin-top: 14px;
+            }}
+            .of-validate-btn {{
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                padding: 10px 20px;
+                border: none;
+                border-radius: 8px;
+                background: linear-gradient(135deg, #f59e0b, #d97706);
+                color: #fff;
+                font-weight: 600;
+                font-size: 0.9rem;
+                cursor: pointer;
+                margin-top: 16px;
+                transition: all 0.2s;
+            }}
+            .of-validate-btn:hover {{
+                transform: translateY(-1px);
+                box-shadow: 0 4px 12px rgba(245,158,11,0.3);
+            }}
+            .of-layout {{
+                display: grid;
+                grid-template-columns: 1fr 260px;
+                gap: 20px;
+                align-items: start;
+            }}
+            @media (max-width: 900px) {{
+                .of-layout {{ grid-template-columns: 1fr; }}
+                .of-sidebar {{ display: none; }}
+            }}
+            .of-sidebar {{
+                position: sticky;
+                top: 24px;
+                background: rgba(15,23,42,0.6);
+                border: 1px solid rgba(148,163,184,0.08);
+                border-radius: 12px;
+                padding: 20px;
+            }}
+            .of-sidebar-title {{
+                font-size: 0.85rem;
+                font-weight: 600;
+                color: #94a3b8;
+                margin-bottom: 16px;
+                text-transform: uppercase;
+                letter-spacing: 0.05em;
+            }}
+            .of-progress-step {{
+                display: flex;
+                align-items: flex-start;
+                gap: 10px;
+                margin-bottom: 14px;
+                cursor: pointer;
+            }}
+            .of-progress-step:last-child {{ margin-bottom: 0; }}
+            .of-progress-dot {{
+                width: 24px;
+                height: 24px;
+                border-radius: 50%;
+                border: 2px solid rgba(148,163,184,0.2);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                flex-shrink: 0;
+                font-size: 0.7rem;
+                font-weight: 700;
+                color: #64748b;
+                transition: all 0.2s;
+            }}
+            .of-progress-step.active .of-progress-dot {{
+                border-color: #f59e0b;
+                color: #f59e0b;
+                background: rgba(245,158,11,0.1);
+            }}
+            .of-progress-step.done .of-progress-dot {{
+                border-color: #22c55e;
+                color: #22c55e;
+                background: rgba(34,197,94,0.1);
+            }}
+            .of-progress-label {{
+                font-size: 0.82rem;
+                color: #64748b;
+                line-height: 1.3;
+                padding-top: 3px;
+            }}
+            .of-progress-step.active .of-progress-label {{
+                color: #f1f5f9;
+                font-weight: 600;
+            }}
+            .of-progress-step.done .of-progress-label {{
+                color: #94a3b8;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            {get_header_html()}
+            {get_status_bar_html()}
+            {get_tabs_html('openflow')}
+
+            <div class="of-layout">
+            <div class="of-main">
+
+            <!-- Step 1: Flow Template -->
+            <div class="of-step-section" id="of-step-1">
+                <div class="of-section-header">
+                    <span class="of-section-num">1</span>
+                    Flow Template
+                </div>
+                <p style="color: #94a3b8; font-size: 0.9rem; margin: 0 0 16px 0;">
+                    Choose a pre-built pattern or start from scratch. Each template configures the right processors and controller services automatically.
+                </p>
+
+                <div class="of-template-grid">
+                    <!-- Kafka / EventHub -->
+                    <div class="of-template-card" onclick="ofSelectTemplate('kafka')" id="of-tpl-kafka">
+                        <span class="of-connector-badge">Connector</span>
+                        <div class="of-card-icon">{get_material_icon('stream', '28px')}</div>
+                        <div class="of-card-title">Kafka / EventHub Ingest</div>
+                        <div class="of-card-desc">Stream messages from Kafka or Azure EventHub into Snowflake via Snowpipe Streaming.</div>
+                        <div class="of-card-processors">
+                            <span class="of-proc-tag">ConsumeKafka</span>
+                            <span class="of-proc-tag">ConvertRecord</span>
+                            <span class="of-proc-tag">PutSnowpipeStreaming</span>
+                        </div>
+                    </div>
+
+                    <!-- REST API -->
+                    <div class="of-template-card" onclick="ofSelectTemplate('rest')" id="of-tpl-rest">
+                        <div class="of-card-icon">{get_material_icon('api', '28px')}</div>
+                        <div class="of-card-title">REST API Ingest</div>
+                        <div class="of-card-desc">Poll or paginate a REST API and land JSON responses into Snowflake tables.</div>
+                        <div class="of-card-processors">
+                            <span class="of-proc-tag">InvokeHTTP</span>
+                            <span class="of-proc-tag">SplitJson</span>
+                            <span class="of-proc-tag">PutSnowpipeStreaming</span>
+                        </div>
+                    </div>
+
+                    <!-- Database CDC -->
+                    <div class="of-template-card" onclick="ofSelectTemplate('cdc')" id="of-tpl-cdc">
+                        <span class="of-connector-badge">Connector</span>
+                        <div class="of-card-icon">{get_material_icon('sync_alt', '28px')}</div>
+                        <div class="of-card-title">Database CDC</div>
+                        <div class="of-card-desc">Capture changes from PostgreSQL, MySQL, or SQL Server and replicate into Snowflake.</div>
+                        <div class="of-card-processors">
+                            <span class="of-proc-tag">CDC Source</span>
+                            <span class="of-proc-tag">ConvertRecord</span>
+                            <span class="of-proc-tag">UpdateSnowflakeDatabase</span>
+                        </div>
+                    </div>
+
+                    <!-- File Processing -->
+                    <div class="of-template-card" onclick="ofSelectTemplate('files')" id="of-tpl-files">
+                        <div class="of-card-icon">{get_material_icon('folder_open', '28px')}</div>
+                        <div class="of-card-title">File Processing</div>
+                        <div class="of-card-desc">List and fetch files from S3, GCS, or Azure Blob, convert formats, and load into Snowflake.</div>
+                        <div class="of-card-processors">
+                            <span class="of-proc-tag">ListS3 / ListGCS</span>
+                            <span class="of-proc-tag">FetchObject</span>
+                            <span class="of-proc-tag">PutSnowpipeStreaming</span>
+                        </div>
+                    </div>
+
+                    <!-- Data Generation -->
+                    <div class="of-template-card" onclick="ofSelectTemplate('datagen')" id="of-tpl-datagen">
+                        <div class="of-card-icon">{get_material_icon('science', '28px')}</div>
+                        <div class="of-card-title">Data Generation</div>
+                        <div class="of-card-desc">Generate synthetic data with DataFaker expressions for testing and development pipelines.</div>
+                        <div class="of-card-processors">
+                            <span class="of-proc-tag">GenerateJSON</span>
+                            <span class="of-proc-tag">MergeRecord</span>
+                            <span class="of-proc-tag">PutSnowpipeStreaming</span>
+                        </div>
+                    </div>
+
+                    <!-- Custom Flow -->
+                    <div class="of-template-card" onclick="ofSelectTemplate('custom')" id="of-tpl-custom">
+                        <div class="of-card-icon">{get_material_icon('draw', '28px')}</div>
+                        <div class="of-card-title">Custom Flow</div>
+                        <div class="of-card-desc">Start from a blank canvas and pick your own processors. Full control over every component.</div>
+                        <div class="of-card-processors">
+                            <span class="of-proc-tag">You choose</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="of-selected-summary" id="of-tpl-summary">
+                    Template selected: <strong id="of-tpl-name"></strong>
+                </div>
+            </div>
+
+            <!-- Step 2: Source Configuration (locked) -->
+            <div class="of-step-section of-step-locked" id="of-step-2">
+                <div class="of-lock-msg">{get_material_icon('lock', '20px')} Select a template above to configure the source</div>
+                <div class="of-section-header">
+                    <span class="of-section-num">2</span>
+                    Source Configuration
+                </div>
+                <div id="of-source-panel">
+                    <p style="color: #64748b; font-size: 0.9rem;">Source configuration will appear here based on your template selection.</p>
+                </div>
+            </div>
+
+            <!-- Step 3: Transformation (locked) -->
+            <div class="of-step-section of-step-locked" id="of-step-3">
+                <div class="of-lock-msg">{get_material_icon('lock', '20px')} Complete source configuration first</div>
+                <div class="of-section-header">
+                    <span class="of-section-num">3</span>
+                    Transformation
+                </div>
+                <p style="color: #94a3b8; font-size: 0.85rem; margin: 0 0 4px;">
+                    Select optional transformation processors to add between source and destination.
+                </p>
+                <div class="of-toggle-grid">
+                    <div class="of-toggle-card" onclick="ofToggleTransform(this, 'convert')" data-transform="convert">
+                        <div class="of-toggle-cb"></div>
+                        <div>
+                            <div class="of-toggle-title">{get_material_icon('swap_horiz', '16px')} Format Conversion</div>
+                            <div class="of-toggle-desc">ConvertRecord &mdash; transform between JSON, Avro, CSV, and Parquet formats.</div>
+                        </div>
+                    </div>
+                    <div class="of-toggle-card" onclick="ofToggleTransform(this, 'jolt')" data-transform="jolt">
+                        <div class="of-toggle-cb"></div>
+                        <div>
+                            <div class="of-toggle-title">{get_material_icon('schema', '16px')} Field Mapping (JOLT)</div>
+                            <div class="of-toggle-desc">JoltTransformJSON &mdash; rename, restructure, or flatten nested JSON fields.</div>
+                        </div>
+                    </div>
+                    <div class="of-toggle-card" onclick="ofToggleTransform(this, 'filter')" data-transform="filter">
+                        <div class="of-toggle-cb"></div>
+                        <div>
+                            <div class="of-toggle-title">{get_material_icon('filter_alt', '16px')} Filtering</div>
+                            <div class="of-toggle-desc">RouteOnAttribute &mdash; keep or discard records based on field values or expressions.</div>
+                        </div>
+                    </div>
+                    <div class="of-toggle-card" onclick="ofToggleTransform(this, 'enrich')" data-transform="enrich">
+                        <div class="of-toggle-cb"></div>
+                        <div>
+                            <div class="of-toggle-title">{get_material_icon('add_circle', '16px')} Enrichment</div>
+                            <div class="of-toggle-desc">UpdateAttribute &mdash; add computed fields, timestamps, or static metadata columns.</div>
+                        </div>
+                    </div>
+                </div>
+                <div id="of-transform-detail" style="margin-top:14px;"></div>
+            </div>
+
+            <!-- Step 4: Snowflake Destination (locked) -->
+            <div class="of-step-section of-step-locked" id="of-step-4">
+                <div class="of-lock-msg">{get_material_icon('lock', '20px')} Complete source configuration first</div>
+                <div class="of-section-header">
+                    <span class="of-section-num">4</span>
+                    Snowflake Destination
+                </div>
+                <p style="color: #94a3b8; font-size: 0.85rem; margin: 0 0 4px;">
+                    Select the target database, schema, and table for incoming data.
+                </p>
+                <div class="of-dest-form">
+                    <div>
+                        <label>Database</label>
+                        <select id="of_dest_db" onchange="ofLoadSchemas()">
+                            <option value="">Loading...</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label>Schema</label>
+                        <select id="of_dest_schema" onchange="ofLoadTables()">
+                            <option value="">Select database first</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label>Table</label>
+                        <select id="of_dest_table">
+                            <option value="">Select schema first</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="of-dest-row2">
+                    <div>
+                        <label style="display:block;color:#94a3b8;font-size:0.82rem;margin-bottom:4px;">Write Method</label>
+                        <select id="of_dest_method" style="width:100%;padding:9px 12px;border-radius:6px;border:1px solid rgba(148,163,184,0.15);background:rgba(15,23,42,0.6);color:#e2e8f0;font-size:0.9rem;">
+                            <option value="snowpipe_streaming">PutSnowpipeStreaming (low latency)</option>
+                            <option value="update_db">UpdateSnowflakeDatabase (merge/upsert)</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label style="display:block;color:#94a3b8;font-size:0.82rem;margin-bottom:4px;">New Table Name (optional)</label>
+                        <input id="of_dest_new_table" type="text" placeholder="Leave blank to use existing table"
+                            style="width:100%;padding:9px 12px;border-radius:6px;border:1px solid rgba(148,163,184,0.15);background:rgba(15,23,42,0.6);color:#e2e8f0;font-size:0.9rem;">
+                    </div>
+                </div>
+                <button class="of-validate-btn" onclick="ofValidateDestination()">
+                    {get_material_icon('check_circle', '18px')} Validate &amp; Continue
+                </button>
+            </div>
+
+            <!-- Step 5: Network & Auth (locked) -->
+            <div class="of-step-section of-step-locked" id="of-step-5">
+                <div class="of-lock-msg">{get_material_icon('lock', '20px')} Complete destination configuration first</div>
+                <div class="of-section-header">
+                    <span class="of-section-num">5</span>
+                    Network &amp; Auth
+                </div>
+                <p style="color: #94a3b8; font-size: 0.85rem; margin: 0 0 12px;">
+                    Configure External Access Integration (EAI) so Openflow on SPCS can reach external sources.
+                </p>
+                <div style="margin-bottom:14px;">
+                    <label style="display:block;color:#94a3b8;font-size:0.82rem;margin-bottom:4px;">EAI Name</label>
+                    <input id="of_eai_name" type="text" placeholder="OPENFLOW_EAI" value="OPENFLOW_EAI"
+                        style="width:100%;padding:9px 12px;border-radius:6px;border:1px solid rgba(148,163,184,0.15);background:rgba(15,23,42,0.6);color:#e2e8f0;font-size:0.9rem;">
+                </div>
+                <div style="margin-bottom:14px;">
+                    <label style="display:block;color:#94a3b8;font-size:0.82rem;margin-bottom:4px;">Allowed Hosts (comma-separated)</label>
+                    <input id="of_eai_hosts" type="text" placeholder="broker1:9092, api.example.com"
+                        style="width:100%;padding:9px 12px;border-radius:6px;border:1px solid rgba(148,163,184,0.15);background:rgba(15,23,42,0.6);color:#e2e8f0;font-size:0.9rem;">
+                    <p style="color:#64748b;font-size:0.78rem;margin:4px 0 0;">Required for SPCS to connect to external Kafka, REST APIs, or databases.</p>
+                </div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+                    <div>
+                        <label style="display:block;color:#94a3b8;font-size:0.82rem;margin-bottom:4px;">Network Rule Name</label>
+                        <input id="of_net_rule" type="text" placeholder="OPENFLOW_NETWORK_RULE" value="OPENFLOW_NETWORK_RULE"
+                            style="width:100%;padding:9px 12px;border-radius:6px;border:1px solid rgba(148,163,184,0.15);background:rgba(15,23,42,0.6);color:#e2e8f0;font-size:0.9rem;">
+                    </div>
+                    <div>
+                        <label style="display:block;color:#94a3b8;font-size:0.82rem;margin-bottom:4px;">Secret Name (optional)</label>
+                        <input id="of_secret_name" type="text" placeholder="OPENFLOW_SECRET"
+                            style="width:100%;padding:9px 12px;border-radius:6px;border:1px solid rgba(148,163,184,0.15);background:rgba(15,23,42,0.6);color:#e2e8f0;font-size:0.9rem;">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Step 6: Review & Generate (locked) -->
+            <div class="of-step-section of-step-locked" id="of-step-6">
+                <div class="of-lock-msg">{get_material_icon('lock', '20px')} Complete all previous steps first</div>
+                <div class="of-section-header">
+                    <span class="of-section-num">6</span>
+                    Review &amp; Generate
+                </div>
+                <p style="color: #94a3b8; font-size: 0.85rem; margin: 0 0 12px;">
+                    Review your pipeline configuration and generate deployment SQL.
+                </p>
+
+                <!-- Pipeline visualization -->
+                <div id="of-pipeline-viz" style="padding:16px;border-radius:8px;background:rgba(15,23,42,0.5);border:1px solid rgba(148,163,184,0.08);margin-bottom:16px;">
+                    <div style="color:#94a3b8;font-size:0.82rem;margin-bottom:8px;font-weight:600;">Pipeline Flow</div>
+                    <div id="of-pipeline-flow" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:0.85rem;"></div>
+                </div>
+
+                <!-- Config summary -->
+                <div id="of-config-summary" style="padding:16px;border-radius:8px;background:rgba(15,23,42,0.5);border:1px solid rgba(148,163,184,0.08);margin-bottom:16px;">
+                    <div style="color:#94a3b8;font-size:0.82rem;margin-bottom:8px;font-weight:600;">Configuration Summary</div>
+                    <div id="of-summary-body" style="font-size:0.85rem;color:#e2e8f0;"></div>
+                </div>
+
+                <button class="of-validate-btn" onclick="ofGenerate()" style="font-size:1rem;padding:12px 28px;">
+                    {get_material_icon('code', '20px')} Generate Deployment SQL
+                </button>
+
+                <!-- Generated SQL output -->
+                <div id="of-sql-output" style="display:none;margin-top:16px;">
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+                        <span style="color:#94a3b8;font-size:0.82rem;font-weight:600;">Generated SQL</span>
+                        <button onclick="ofCopySql()" style="padding:5px 12px;border:1px solid rgba(148,163,184,0.15);border-radius:6px;background:rgba(30,41,59,0.7);color:#94a3b8;font-size:0.8rem;cursor:pointer;">Copy</button>
+                    </div>
+                    <pre id="of-sql-pre" style="padding:16px;border-radius:8px;background:rgba(15,23,42,0.8);border:1px solid rgba(148,163,184,0.08);color:#e2e8f0;font-size:0.82rem;font-family:'SF Mono','Fira Code',monospace;overflow-x:auto;white-space:pre-wrap;max-height:500px;overflow-y:auto;"></pre>
+                </div>
+            </div>
+            </div><!-- /of-main -->
+
+            <!-- Sidebar: Wizard Progress -->
+            <div class="of-sidebar">
+                <div class="of-sidebar-title">Wizard Progress</div>
+                <div class="of-progress-step active" id="of-prog-1" onclick="document.getElementById('of-step-1')?.scrollIntoView({{behavior:'smooth',block:'start'}})">
+                    <div class="of-progress-dot">1</div>
+                    <div class="of-progress-label">Flow Template</div>
+                </div>
+                <div class="of-progress-step" id="of-prog-2" onclick="document.getElementById('of-step-2')?.scrollIntoView({{behavior:'smooth',block:'start'}})">
+                    <div class="of-progress-dot">2</div>
+                    <div class="of-progress-label">Source Config</div>
+                </div>
+                <div class="of-progress-step" id="of-prog-3" onclick="document.getElementById('of-step-3')?.scrollIntoView({{behavior:'smooth',block:'start'}})">
+                    <div class="of-progress-dot">3</div>
+                    <div class="of-progress-label">Transformation</div>
+                </div>
+                <div class="of-progress-step" id="of-prog-4" onclick="document.getElementById('of-step-4')?.scrollIntoView({{behavior:'smooth',block:'start'}})">
+                    <div class="of-progress-dot">4</div>
+                    <div class="of-progress-label">Destination</div>
+                </div>
+                <div class="of-progress-step" id="of-prog-5" onclick="document.getElementById('of-step-5')?.scrollIntoView({{behavior:'smooth',block:'start'}})">
+                    <div class="of-progress-dot">5</div>
+                    <div class="of-progress-label">Network &amp; Auth</div>
+                </div>
+                <div class="of-progress-step" id="of-prog-6" onclick="document.getElementById('of-step-6')?.scrollIntoView({{behavior:'smooth',block:'start'}})">
+                    <div class="of-progress-dot">6</div>
+                    <div class="of-progress-label">Review &amp; Generate</div>
+                </div>
+            </div>
+
+            </div><!-- /of-layout -->
+        </div>
+
+        <script>
+        // ── Openflow Wizard State ──
+        const ofState = {{
+            template: null,
+            sourceValid: false,
+        }};
+
+        const ofTemplateLabels = {{
+            kafka: 'Kafka / EventHub Ingest',
+            rest: 'REST API Ingest',
+            cdc: 'Database CDC',
+            files: 'File Processing',
+            datagen: 'Data Generation',
+            custom: 'Custom Flow',
+        }};
+
+        // ── Form field helper ──
+        function ofField(id, label, placeholder, type='text', opts) {{
+            if (type === 'select' && opts) {{
+                const options = opts.map(o => `<option value="${{o[0]}}">${{o[1]}}</option>`).join('');
+                return `<div style="margin-bottom:14px;">
+                    <label style="display:block;color:#94a3b8;font-size:0.82rem;margin-bottom:4px;">${{label}}</label>
+                    <select id="${{id}}" style="width:100%;padding:9px 12px;border-radius:6px;border:1px solid rgba(148,163,184,0.15);background:rgba(15,23,42,0.6);color:#e2e8f0;font-size:0.9rem;">
+                        ${{options}}
+                    </select>
+                </div>`;
+            }}
+            if (type === 'textarea') {{
+                return `<div style="margin-bottom:14px;">
+                    <label style="display:block;color:#94a3b8;font-size:0.82rem;margin-bottom:4px;">${{label}}</label>
+                    <textarea id="${{id}}" placeholder="${{placeholder}}" rows="6"
+                        style="width:100%;padding:9px 12px;border-radius:6px;border:1px solid rgba(148,163,184,0.15);background:rgba(15,23,42,0.6);color:#e2e8f0;font-size:0.85rem;font-family:'SF Mono','Fira Code',monospace;resize:vertical;">${{placeholder}}</textarea>
+                </div>`;
+            }}
+            return `<div style="margin-bottom:14px;">
+                <label style="display:block;color:#94a3b8;font-size:0.82rem;margin-bottom:4px;">${{label}}</label>
+                <input id="${{id}}" type="${{type}}" placeholder="${{placeholder}}"
+                    style="width:100%;padding:9px 12px;border-radius:6px;border:1px solid rgba(148,163,184,0.15);background:rgba(15,23,42,0.6);color:#e2e8f0;font-size:0.9rem;">
+            </div>`;
+        }}
+
+        // ── Source panels per template ──
+        function ofGetSourcePanel(tpl) {{
+            const F = ofField;
+            const row2 = (a,b) => `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">${{a}}${{b}}</div>`;
+            const validateBtn = `<button class="of-validate-btn" onclick="ofValidateSource()">Validate Source &amp; Continue</button>`;
+
+            switch (tpl) {{
+                case 'kafka':
+                    return `<p style="color:#94a3b8;font-size:0.85rem;margin:0 0 16px;">Configure your Kafka or Azure EventHub source connection.</p>`
+                        + F('of_kafka_bootstrap', 'Bootstrap Servers', 'broker1:9092, broker2:9092')
+                        + F('of_kafka_topic', 'Topic Name', 'my-events-topic')
+                        + row2(
+                            F('of_kafka_group', 'Consumer Group', 'openflow-consumer-1'),
+                            F('of_kafka_auth', 'Authentication', '', 'select', [['none','None'],['sasl_plain','SASL/PLAIN'],['sasl_scram','SASL/SCRAM-256'],['mtls','mTLS']])
+                        )
+                        + `<div id="of_kafka_auth_fields"></div>`
+                        + F('of_kafka_schema_reg', 'Schema Registry URL (optional)', 'https://schema-registry:8081')
+                        + validateBtn;
+
+                case 'rest':
+                    return `<p style="color:#94a3b8;font-size:0.85rem;margin:0 0 16px;">Configure the REST API endpoint to poll.</p>`
+                        + F('of_rest_url', 'API URL', 'https://api.example.com/v1/data')
+                        + row2(
+                            F('of_rest_method', 'HTTP Method', '', 'select', [['GET','GET'],['POST','POST']]),
+                            F('of_rest_auth', 'Authentication', '', 'select', [['none','None'],['bearer','Bearer Token'],['apikey','API Key'],['basic','Basic Auth']])
+                        )
+                        + `<div id="of_rest_auth_fields"></div>`
+                        + F('of_rest_headers', 'Custom Headers (JSON)', '{{"Accept": "application/json"}}', 'textarea')
+                        + F('of_rest_pagination', 'Pagination', '', 'select', [['none','None'],['offset','Offset/Limit'],['cursor','Cursor-based'],['link','Link Header']])
+                        + validateBtn;
+
+                case 'cdc':
+                    return `<p style="color:#94a3b8;font-size:0.85rem;margin:0 0 16px;">Configure the source database for Change Data Capture replication.</p>`
+                        + F('of_cdc_dbtype', 'Database Type', '', 'select', [['postgres','PostgreSQL'],['mysql','MySQL'],['sqlserver','SQL Server']])
+                        + row2(
+                            F('of_cdc_host', 'Host', 'db.example.com'),
+                            F('of_cdc_port', 'Port', '5432')
+                        )
+                        + row2(
+                            F('of_cdc_database', 'Database', 'mydb'),
+                            F('of_cdc_schema', 'Schema', 'public')
+                        )
+                        + F('of_cdc_tables', 'Tables (comma-separated)', 'users, orders, products')
+                        + row2(
+                            F('of_cdc_user', 'Username', 'replication_user'),
+                            F('of_cdc_pass', 'Password', '', 'password')
+                        )
+                        + validateBtn;
+
+                case 'files':
+                    return `<p style="color:#94a3b8;font-size:0.85rem;margin:0 0 16px;">Configure cloud storage source for file-based ingestion.</p>`
+                        + F('of_file_provider', 'Cloud Provider', '', 'select', [['s3','Amazon S3'],['gcs','Google Cloud Storage'],['azure','Azure Blob Storage']])
+                        + F('of_file_bucket', 'Bucket / Container', 'my-data-bucket')
+                        + F('of_file_prefix', 'Prefix (optional)', 'raw/events/')
+                        + F('of_file_format', 'File Format', '', 'select', [['json','JSON'],['csv','CSV'],['parquet','Parquet'],['avro','Avro']])
+                        + validateBtn;
+
+                case 'datagen':
+                    return `<p style="color:#94a3b8;font-size:0.85rem;margin:0 0 16px;">Configure synthetic data generation using DataFaker expressions.</p>`
+                        + F('of_dg_schema', 'JSON Schema (DataFaker expressions)', `{{
+  "id": "${{Internet.uuid}}",
+  "timestamp": "${{TimeAndDate.past '5','SECONDS'}}",
+  "customer_id": "${{regexify 'CUST[0-9]{{6}}'}}",
+  "amount": ${{Number.randomDouble '2','10','9999'}},
+  "status": "${{Options.option 'active','pending','cancelled'}}"
+}}`, 'textarea')
+                        + row2(
+                            F('of_dg_batch', 'Batch Size', '100'),
+                            F('of_dg_interval', 'Schedule (seconds)', '60')
+                        )
+                        + validateBtn;
+
+                case 'custom':
+                    return `<div style="padding:24px;text-align:center;border:1px dashed rgba(148,163,184,0.15);border-radius:8px;background:rgba(15,23,42,0.3);">
+                        <p style="color:#94a3b8;font-size:0.9rem;margin:0 0 8px;">Custom flows are configured directly in the Openflow UI.</p>
+                        <p style="color:#64748b;font-size:0.82rem;margin:0;">The wizard will generate the setup SQL (EAI, grants) and you add processors manually.</p>
+                    </div>`;
+
+                default:
+                    return `<p style="color:#64748b;font-size:0.9rem;">Select a template to see source configuration.</p>`;
+            }}
+        }}
+
+        function ofSelectTemplate(tpl) {{
+            // Deselect all cards
+            document.querySelectorAll('.of-template-card').forEach(c => c.classList.remove('active'));
+            // Activate selected
+            const card = document.getElementById('of-tpl-' + tpl);
+            if (card) card.classList.add('active');
+
+            ofState.template = tpl;
+
+            // Show summary
+            const summary = document.getElementById('of-tpl-summary');
+            const nameEl = document.getElementById('of-tpl-name');
+            if (summary && nameEl) {{
+                nameEl.textContent = ofTemplateLabels[tpl] || tpl;
+                summary.style.display = 'block';
+            }}
+
+            // Unlock Step 2 and inject source panel
+            const step2 = document.getElementById('of-step-2');
+            if (step2) {{
+                step2.classList.remove('of-step-locked');
+                const lockMsg = step2.querySelector('.of-lock-msg');
+                if (lockMsg) lockMsg.style.display = 'none';
+            }}
+            const panel = document.getElementById('of-source-panel');
+            if (panel) {{
+                panel.innerHTML = ofGetSourcePanel(tpl);
+            }}
+
+            // For custom template, auto-unlock steps 3 & 4 since no source config needed
+            if (tpl === 'custom') {{
+                ofUnlockStep(3);
+                ofUnlockStep(4);
+                ofState.sourceValid = true;
+                ofLoadDatabases();
+            }} else {{
+                ofState.sourceValid = false;
+            }}
+
+            // Scroll to step 2
+            step2?.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+
+            // Update sidebar progress
+            ofUpdateProgress(2);
+        }}
+
+        function ofUnlockStep(n) {{
+            const el = document.getElementById('of-step-' + n);
+            if (el) {{
+                el.classList.remove('of-step-locked');
+                const lockMsg = el.querySelector('.of-lock-msg');
+                if (lockMsg) lockMsg.style.display = 'none';
+            }}
+        }}
+
+        // ── Transformation toggles ──
+        function ofToggleTransform(card, key) {{
+            card.classList.toggle('active');
+            const isActive = card.classList.contains('active');
+            if (isActive) {{
+                if (!ofState.transforms) ofState.transforms = [];
+                if (!ofState.transforms.includes(key)) ofState.transforms.push(key);
+            }} else {{
+                if (ofState.transforms) {{
+                    ofState.transforms = ofState.transforms.filter(t => t !== key);
+                }}
+            }}
+        }}
+
+        // ── Source validation → unlock steps 3 & 4 ──
+        function ofValidateSource() {{
+            ofState.sourceValid = true;
+            ofUnlockStep(3);
+            ofUnlockStep(4);
+            // Load databases for destination dropdown
+            ofLoadDatabases();
+            ofUpdateProgress(3);
+            document.getElementById('of-step-3')?.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+        }}
+
+        // ── Destination dropdown cascading ──
+        async function ofLoadDatabases() {{
+            try {{
+                const resp = await fetch('/api/databases');
+                const data = await resp.json();
+                const sel = document.getElementById('of_dest_db');
+                if (!sel) return;
+                sel.innerHTML = '<option value="">-- Select Database --</option>';
+                (data.databases || data || []).forEach(db => {{
+                    const name = typeof db === 'string' ? db : (db.name || db.database_name || db);
+                    sel.innerHTML += `<option value="${{name}}">${{name}}</option>`;
+                }});
+            }} catch(e) {{
+                console.error('Failed to load databases', e);
+            }}
+        }}
+
+        async function ofLoadSchemas() {{
+            const db = document.getElementById('of_dest_db')?.value;
+            const sel = document.getElementById('of_dest_schema');
+            const tblSel = document.getElementById('of_dest_table');
+            if (!sel) return;
+            sel.innerHTML = '<option value="">Loading...</option>';
+            if (tblSel) tblSel.innerHTML = '<option value="">Select schema first</option>';
+            if (!db) {{ sel.innerHTML = '<option value="">Select database first</option>'; return; }}
+            try {{
+                const resp = await fetch(`/api/schemas/${{db}}`);
+                const data = await resp.json();
+                sel.innerHTML = '<option value="">-- Select Schema --</option>';
+                (data.schemas || data || []).forEach(s => {{
+                    const name = typeof s === 'string' ? s : (s.name || s.schema_name || s);
+                    sel.innerHTML += `<option value="${{name}}">${{name}}</option>`;
+                }});
+            }} catch(e) {{
+                console.error('Failed to load schemas', e);
+            }}
+        }}
+
+        async function ofLoadTables() {{
+            const db = document.getElementById('of_dest_db')?.value;
+            const schema = document.getElementById('of_dest_schema')?.value;
+            const sel = document.getElementById('of_dest_table');
+            if (!sel) return;
+            sel.innerHTML = '<option value="">Loading...</option>';
+            if (!db || !schema) {{ sel.innerHTML = '<option value="">Select schema first</option>'; return; }}
+            try {{
+                const resp = await fetch(`/api/tables/${{db}}/${{schema}}`);
+                const data = await resp.json();
+                sel.innerHTML = '<option value="">(Create New Table)</option>';
+                (data.tables || data || []).forEach(t => {{
+                    const name = typeof t === 'string' ? t : (t.name || t.table_name || t);
+                    sel.innerHTML += `<option value="${{name}}">${{name}}</option>`;
+                }});
+            }} catch(e) {{
+                console.error('Failed to load tables', e);
+            }}
+        }}
+
+        // ── Destination validation → unlock steps 5 & 6 ──
+        function ofValidateDestination() {{
+            const db = document.getElementById('of_dest_db')?.value;
+            const schema = document.getElementById('of_dest_schema')?.value;
+            const table = document.getElementById('of_dest_table')?.value;
+            const newTable = document.getElementById('of_dest_new_table')?.value;
+
+            if (!db || !schema) {{
+                alert('Please select a database and schema.');
+                return;
+            }}
+            if (!table && !newTable) {{
+                alert('Please select an existing table or enter a new table name.');
+                return;
+            }}
+
+            ofState.destDb = db;
+            ofState.destSchema = schema;
+            ofState.destTable = table || newTable;
+            ofState.destMethod = document.getElementById('of_dest_method')?.value || 'snowpipe_streaming';
+
+            ofUnlockStep(5);
+            ofUnlockStep(6);
+            ofUpdateProgress(5);
+            document.getElementById('of-step-5')?.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+        }}
+
+        // ── On page load: add validate button to step 2 for non-custom templates ──
+        // (This is handled dynamically when source panel is injected)
+
+        // ── Pipeline visualization + Summary (called when step 6 unlocks) ──
+        function ofBuildPipelineViz() {{
+            const flow = document.getElementById('of-pipeline-flow');
+            const summaryBody = document.getElementById('of-summary-body');
+            if (!flow || !summaryBody) return;
+
+            // Build processor chain based on template + transforms
+            const processors = [];
+            const tpl = ofState.template;
+            const arrow = `<span style="color:#64748b;">\u2192</span>`;
+            const chip = (name, color) => `<span style="padding:4px 10px;border-radius:6px;background:rgba(${{color}},0.12);color:rgb(${{color}});font-family:'SF Mono','Fira Code',monospace;font-size:0.8rem;">${{name}}</span>`;
+
+            // Source processor
+            const srcMap = {{
+                kafka: 'ConsumeKafka', rest: 'InvokeHTTP', cdc: 'CDC Source',
+                files: 'ListS3/FetchObject', datagen: 'GenerateJSON', custom: 'Custom Source'
+            }};
+            processors.push(chip(srcMap[tpl] || 'Source', '245,158,11'));
+
+            // Transform processors
+            const tLabels = {{ convert: 'ConvertRecord', jolt: 'JoltTransformJSON', filter: 'RouteOnAttribute', enrich: 'UpdateAttribute' }};
+            (ofState.transforms || []).forEach(t => {{
+                processors.push(chip(tLabels[t] || t, '99,102,241'));
+            }});
+
+            // Destination processor
+            const method = ofState.destMethod || 'snowpipe_streaming';
+            const destProc = method === 'update_db' ? 'UpdateSnowflakeDatabase' : 'PutSnowpipeStreaming';
+            processors.push(chip(destProc, '34,197,94'));
+
+            flow.innerHTML = processors.join(arrow);
+
+            // Build config summary
+            const lines = [];
+            lines.push(`<div style="margin-bottom:6px;"><strong>Template:</strong> ${{ofTemplateLabels[tpl] || tpl}}</div>`);
+            lines.push(`<div style="margin-bottom:6px;"><strong>Destination:</strong> ${{ofState.destDb || '?'}}.${{ofState.destSchema || '?'}}.${{ofState.destTable || '?'}}</div>`);
+            lines.push(`<div style="margin-bottom:6px;"><strong>Write Method:</strong> ${{destProc}}</div>`);
+            if ((ofState.transforms || []).length > 0) {{
+                lines.push(`<div style="margin-bottom:6px;"><strong>Transforms:</strong> ${{ofState.transforms.map(t => tLabels[t] || t).join(', ')}}</div>`);
+            }}
+            const eaiName = document.getElementById('of_eai_name')?.value || 'OPENFLOW_EAI';
+            const eaiHosts = document.getElementById('of_eai_hosts')?.value || '';
+            if (eaiHosts) {{
+                lines.push(`<div style="margin-bottom:6px;"><strong>EAI:</strong> ${{eaiName}} &mdash; ${{eaiHosts}}</div>`);
+            }}
+            summaryBody.innerHTML = lines.join('');
+        }}
+
+        // Observer: build viz when step 6 becomes visible
+        const step6Observer = new MutationObserver(() => {{
+            const s6 = document.getElementById('of-step-6');
+            if (s6 && !s6.classList.contains('of-step-locked')) {{
+                ofBuildPipelineViz();
+            }}
+        }});
+        const s6el = document.getElementById('of-step-6');
+        if (s6el) step6Observer.observe(s6el, {{ attributes: true, attributeFilter: ['class'] }});
+
+        // ── Generate SQL ──
+        async function ofGenerate() {{
+            ofBuildPipelineViz();
+            const payload = {{
+                template: ofState.template,
+                dest_db: ofState.destDb,
+                dest_schema: ofState.destSchema,
+                dest_table: ofState.destTable,
+                dest_method: ofState.destMethod || 'snowpipe_streaming',
+                transforms: ofState.transforms || [],
+                eai_name: document.getElementById('of_eai_name')?.value || 'OPENFLOW_EAI',
+                eai_hosts: document.getElementById('of_eai_hosts')?.value || '',
+                network_rule: document.getElementById('of_net_rule')?.value || 'OPENFLOW_NETWORK_RULE',
+                secret_name: document.getElementById('of_secret_name')?.value || '',
+            }};
+            try {{
+                const resp = await fetch('/api/openflow/generate', {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify(payload),
+                }});
+                const data = await resp.json();
+                if (data.sql) {{
+                    document.getElementById('of-sql-pre').textContent = data.sql;
+                    document.getElementById('of-sql-output').style.display = 'block';
+                }} else {{
+                    alert(data.error || 'Failed to generate SQL');
+                }}
+            }} catch(e) {{
+                alert('Error: ' + e.message);
+            }}
+        }}
+
+        function ofCopySql() {{
+            const sql = document.getElementById('of-sql-pre')?.textContent || '';
+            navigator.clipboard.writeText(sql).then(() => {{
+                const btn = event.target;
+                btn.textContent = 'Copied!';
+                setTimeout(() => btn.textContent = 'Copy', 2000);
+            }});
+        }}
+
+        // ── Sidebar progress tracking ──
+        function ofUpdateProgress(activeStep) {{
+            for (let i = 1; i <= 6; i++) {{
+                const prog = document.getElementById('of-prog-' + i);
+                if (!prog) continue;
+                prog.classList.remove('active', 'done');
+                if (i < activeStep) {{
+                    prog.classList.add('done');
+                    prog.querySelector('.of-progress-dot').textContent = '\u2713';
+                }} else if (i === activeStep) {{
+                    prog.classList.add('active');
+                    prog.querySelector('.of-progress-dot').textContent = i;
+                }} else {{
+                    prog.querySelector('.of-progress-dot').textContent = i;
+                }}
+            }}
+        }}
+        </script>
+    </body>
+    </html>
+    """
+
+
+@app.post("/api/openflow/generate")
+async def openflow_generate(request: Request):
+    """Generate deployment SQL for an Openflow pipeline based on wizard configuration."""
+    try:
+        body = await request.json()
+        template = body.get("template", "custom")
+        dest_db = body.get("dest_db", "MY_DB")
+        dest_schema = body.get("dest_schema", "PUBLIC")
+        dest_table = body.get("dest_table", "MY_TABLE")
+        dest_method = body.get("dest_method", "snowpipe_streaming")
+        transforms = body.get("transforms", [])
+        eai_name = body.get("eai_name", "OPENFLOW_EAI")
+        eai_hosts = body.get("eai_hosts", "")
+        network_rule = body.get("network_rule", "OPENFLOW_NETWORK_RULE")
+        secret_name = body.get("secret_name", "")
+
+        sql_parts = []
+        sql_parts.append(f"-- Openflow Pipeline Deployment SQL")
+        sql_parts.append(f"-- Template: {template}")
+        sql_parts.append(f"-- Generated by FLUX Data Forge\n")
+
+        # 1. Network rule (if hosts provided)
+        if eai_hosts.strip():
+            hosts_list = ", ".join(f"'{h.strip()}'" for h in eai_hosts.split(",") if h.strip())
+            sql_parts.append(f"-- Step 1: Create Network Rule")
+            sql_parts.append(f"CREATE OR REPLACE NETWORK RULE {dest_db}.{dest_schema}.{network_rule}")
+            sql_parts.append(f"  MODE = EGRESS")
+            sql_parts.append(f"  TYPE = HOST_PORT")
+            sql_parts.append(f"  VALUE_LIST = ({hosts_list});\n")
+
+        # 2. Secret (if provided)
+        if secret_name.strip():
+            sql_parts.append(f"-- Step 2: Create Secret (update credentials)")
+            sql_parts.append(f"CREATE OR REPLACE SECRET {dest_db}.{dest_schema}.{secret_name}")
+            sql_parts.append(f"  TYPE = GENERIC_STRING")
+            sql_parts.append(f"  SECRET_STRING = '<UPDATE_WITH_ACTUAL_SECRET>';\n")
+
+        # 3. External Access Integration
+        if eai_hosts.strip():
+            sql_parts.append(f"-- Step 3: Create External Access Integration")
+            sql_parts.append(f"CREATE OR REPLACE EXTERNAL ACCESS INTEGRATION {eai_name}")
+            sql_parts.append(f"  ALLOWED_NETWORK_RULES = ({dest_db}.{dest_schema}.{network_rule})")
+            if secret_name.strip():
+                sql_parts.append(f"  ALLOWED_AUTHENTICATION_SECRETS = ({dest_db}.{dest_schema}.{secret_name})")
+            sql_parts.append(f"  ENABLED = TRUE;\n")
+
+        # 4. Destination table
+        sql_parts.append(f"-- Step 4: Create destination table (if needed)")
+        sql_parts.append(f"CREATE TABLE IF NOT EXISTS {dest_db}.{dest_schema}.{dest_table} (")
+        sql_parts.append(f"  RECORD_CONTENT VARIANT,")
+        sql_parts.append(f"  RECORD_METADATA VARIANT,")
+        sql_parts.append(f"  _INGESTED_AT TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()")
+        sql_parts.append(f");\n")
+
+        # 5. Grants
+        sql_parts.append(f"-- Step 5: Grant permissions to Openflow service role")
+        sql_parts.append(f"GRANT USAGE ON DATABASE {dest_db} TO ROLE OPENFLOW_SVC_ROLE;")
+        sql_parts.append(f"GRANT USAGE ON SCHEMA {dest_db}.{dest_schema} TO ROLE OPENFLOW_SVC_ROLE;")
+        sql_parts.append(f"GRANT INSERT, SELECT ON TABLE {dest_db}.{dest_schema}.{dest_table} TO ROLE OPENFLOW_SVC_ROLE;")
+        if eai_hosts.strip():
+            sql_parts.append(f"GRANT USAGE ON INTEGRATION {eai_name} TO ROLE OPENFLOW_SVC_ROLE;")
+        sql_parts.append("")
+
+        # 6. Processor config hints as comments
+        src_map = {
+            "kafka": "ConsumeKafka_2_6 → bootstrap.servers, topic, group.id, security.protocol",
+            "rest": "InvokeHTTP → Remote URL, HTTP Method, Request Headers",
+            "cdc": "CDC Source Connector → database.hostname, database.port, database.dbname, table.include.list",
+            "files": "ListS3 + FetchS3Object → Bucket, Prefix, Region",
+            "datagen": "GenerateJSON (DataFaker) → JSON Schema, Batch Size, Schedule",
+            "custom": "Configure processors manually in the Openflow UI",
+        }
+        sql_parts.append(f"-- Step 6: Openflow Processor Configuration Reference")
+        sql_parts.append(f"-- Source: {src_map.get(template, 'Custom')}")
+
+        if transforms:
+            transform_map = {
+                "convert": "ConvertRecord (JsonTreeReader → JsonRecordSetWriter or AvroRecordSetWriter)",
+                "jolt": "JoltTransformJSON (shift/default/remove specs)",
+                "filter": "RouteOnAttribute (expression-based filtering)",
+                "enrich": "UpdateAttribute (add timestamp, static fields, computed values)",
+            }
+            for t in transforms:
+                sql_parts.append(f"-- Transform: {transform_map.get(t, t)}")
+
+        dest_proc = "UpdateSnowflakeDatabase" if dest_method == "update_db" else "PutSnowpipeStreaming"
+        sql_parts.append(f"-- Destination: {dest_proc} → {dest_db}.{dest_schema}.{dest_table}")
+        sql_parts.append(f"\n-- Deploy these SQL statements, then configure the processors in the Openflow UI.")
+
+        sql = "\n".join(sql_parts)
+        return {"sql": sql}
+
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def create_streaming_task_sql(database: str, schema: str, task_name: str, table_name: str, 
                                num_meters: int, interval_minutes: int, service_area: str) -> str:
     return f"""
@@ -10452,6 +12166,11 @@ async def start_stream(
     - stage_name: External stage for stage destination
     - stage_file_format: parquet, json, or csv
     """
+    # Decode base64-encoded connection string (semicolons get mangled in form encoding)
+    if eh_conn_str.startswith('b64:'):
+        import base64
+        eh_conn_str = base64.b64decode(eh_conn_str[4:]).decode('utf-8')
+
     # Extract mechanism and dest from data_flow for backward compatibility
     flow_cfg = DATA_FLOWS.get(data_flow, DATA_FLOWS['streaming_insert'])
     mechanism = flow_cfg.get('mechanism', 'snowpipe_classic')
@@ -10712,6 +12431,9 @@ async def start_stream(
                 if compare_mode == "1" and mechanism == 'snowpipe_hp':
                     worker_target = comparison_streaming_worker
                     worker_label = "HP SDK vs SQL INSERT Comparison"
+                elif stream_source == "eventhub_produce":
+                    worker_target = eventhub_producer_worker
+                    worker_label = "Generate Data → Azure EventHub"
                 elif stream_source == "eventhub":
                     worker_target = eventhub_streaming_worker
                     worker_label = "EventHub → Snowflake"
