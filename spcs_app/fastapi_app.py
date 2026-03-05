@@ -10918,6 +10918,27 @@ async def openflow_page():
                 color: #f59e0b;
                 font-weight: 600;
             }}
+            .of-category {{
+                margin-bottom: 20px;
+            }}
+            .of-category-header {{
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                margin-bottom: 10px;
+                padding-bottom: 6px;
+                border-bottom: 1px solid rgba(148,163,184,0.1);
+            }}
+            .of-category-label {{
+                font-size: 0.78rem;
+                font-weight: 600;
+                color: #94a3b8;
+                text-transform: uppercase;
+                letter-spacing: 0.05em;
+            }}
+            .of-category-icon {{
+                color: #64748b;
+            }}
             .of-step-section {{
                 margin-top: 24px;
                 padding: 24px;
@@ -11140,6 +11161,14 @@ async def openflow_page():
                 </p>
 
                 <div class="of-template-grid">
+                    <!-- Category: Streaming & Events -->
+                    <div class="of-category" style="grid-column: 1 / -1;">
+                        <div class="of-category-header">
+                            <span class="of-category-icon">{get_material_icon('bolt', '16px', '#64748b')}</span>
+                            <span class="of-category-label">Streaming &amp; Events</span>
+                        </div>
+                    </div>
+
                     <!-- Kafka / EventHub -->
                     <div class="of-template-card" onclick="ofSelectTemplate('kafka')" id="of-tpl-kafka">
                         <span class="of-connector-badge">Connector</span>
@@ -11149,18 +11178,6 @@ async def openflow_page():
                         <div class="of-card-processors">
                             <span class="of-proc-tag">ConsumeKafka</span>
                             <span class="of-proc-tag">ConvertRecord</span>
-                            <span class="of-proc-tag">PutSnowpipeStreaming</span>
-                        </div>
-                    </div>
-
-                    <!-- REST API -->
-                    <div class="of-template-card" onclick="ofSelectTemplate('rest')" id="of-tpl-rest">
-                        <div class="of-card-icon">{get_material_icon('api', '28px')}</div>
-                        <div class="of-card-title">REST API Ingest</div>
-                        <div class="of-card-desc">Poll or paginate a REST API and land JSON responses into Snowflake tables.</div>
-                        <div class="of-card-processors">
-                            <span class="of-proc-tag">InvokeHTTP</span>
-                            <span class="of-proc-tag">SplitJson</span>
                             <span class="of-proc-tag">PutSnowpipeStreaming</span>
                         </div>
                     </div>
@@ -11178,6 +11195,26 @@ async def openflow_page():
                         </div>
                     </div>
 
+                    <!-- Category: API & Files -->
+                    <div class="of-category" style="grid-column: 1 / -1;">
+                        <div class="of-category-header">
+                            <span class="of-category-icon">{get_material_icon('cloud_download', '16px', '#64748b')}</span>
+                            <span class="of-category-label">API &amp; Files</span>
+                        </div>
+                    </div>
+
+                    <!-- REST API -->
+                    <div class="of-template-card" onclick="ofSelectTemplate('rest')" id="of-tpl-rest">
+                        <div class="of-card-icon">{get_material_icon('api', '28px')}</div>
+                        <div class="of-card-title">REST API Ingest</div>
+                        <div class="of-card-desc">Poll or paginate a REST API and land JSON responses into Snowflake tables.</div>
+                        <div class="of-card-processors">
+                            <span class="of-proc-tag">InvokeHTTP</span>
+                            <span class="of-proc-tag">SplitJson</span>
+                            <span class="of-proc-tag">PutSnowpipeStreaming</span>
+                        </div>
+                    </div>
+
                     <!-- File Processing -->
                     <div class="of-template-card" onclick="ofSelectTemplate('files')" id="of-tpl-files">
                         <div class="of-card-icon">{get_material_icon('folder_open', '28px')}</div>
@@ -11187,6 +11224,14 @@ async def openflow_page():
                             <span class="of-proc-tag">ListS3 / ListGCS</span>
                             <span class="of-proc-tag">FetchObject</span>
                             <span class="of-proc-tag">PutSnowpipeStreaming</span>
+                        </div>
+                    </div>
+
+                    <!-- Category: Development & Custom -->
+                    <div class="of-category" style="grid-column: 1 / -1;">
+                        <div class="of-category-header">
+                            <span class="of-category-icon">{get_material_icon('build', '16px', '#64748b')}</span>
+                            <span class="of-category-label">Development &amp; Custom</span>
                         </div>
                     </div>
 
