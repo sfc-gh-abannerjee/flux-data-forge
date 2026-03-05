@@ -11139,6 +11139,221 @@ async def openflow_page():
             .of-progress-step.done .of-progress-label {{
                 color: #94a3b8;
             }}
+            /* ── Flow Studio: Import Panel ── */
+            .of-studio-header {{
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                margin-bottom: 8px;
+                padding: 0 0 0 2px;
+            }}
+            .of-studio-title {{
+                font-size: 1.3rem;
+                font-weight: 700;
+                color: #f1f5f9;
+                letter-spacing: -0.01em;
+            }}
+            .of-studio-badge {{
+                display: inline-block;
+                background: rgba(245,158,11,0.15);
+                color: #f59e0b;
+                font-size: 0.65rem;
+                font-weight: 700;
+                padding: 2px 8px;
+                border-radius: 4px;
+                text-transform: uppercase;
+                letter-spacing: 0.06em;
+            }}
+            .of-import-panel {{
+                margin-bottom: 12px;
+                padding: 20px 24px;
+                border-radius: 12px;
+                background: rgba(15,23,42,0.5);
+                border: 1px solid rgba(148,163,184,0.08);
+            }}
+            .of-import-header {{
+                display: flex;
+                align-items: center;
+                gap: 10px;
+                margin-bottom: 14px;
+                font-size: 0.95rem;
+                font-weight: 600;
+                color: #e2e8f0;
+            }}
+            .of-import-modes {{
+                display: flex;
+                gap: 10px;
+                margin-bottom: 14px;
+            }}
+            .of-import-mode-btn {{
+                padding: 7px 16px;
+                border-radius: 6px;
+                border: 1px solid rgba(148,163,184,0.15);
+                background: rgba(30,41,59,0.5);
+                color: #94a3b8;
+                font-size: 0.82rem;
+                font-weight: 500;
+                cursor: pointer;
+                transition: all 0.15s;
+            }}
+            .of-import-mode-btn:hover {{
+                border-color: rgba(245,158,11,0.3);
+                color: #e2e8f0;
+            }}
+            .of-import-mode-btn.active {{
+                background: rgba(245,158,11,0.1);
+                border-color: rgba(245,158,11,0.4);
+                color: #f59e0b;
+                font-weight: 600;
+            }}
+            .of-import-dropzone {{
+                border: 2px dashed rgba(148,163,184,0.15);
+                border-radius: 10px;
+                padding: 28px;
+                text-align: center;
+                cursor: pointer;
+                transition: all 0.2s;
+                background: rgba(15,23,42,0.3);
+            }}
+            .of-import-dropzone:hover,
+            .of-import-dropzone.dragover {{
+                border-color: rgba(245,158,11,0.4);
+                background: rgba(245,158,11,0.04);
+            }}
+            .of-import-textarea {{
+                width: 100%;
+                min-height: 120px;
+                padding: 12px 14px;
+                border-radius: 8px;
+                border: 1px solid rgba(148,163,184,0.15);
+                background: rgba(15,23,42,0.6);
+                color: #e2e8f0;
+                font-size: 0.82rem;
+                font-family: 'SF Mono','Fira Code',monospace;
+                resize: vertical;
+            }}
+            .of-import-textarea:focus {{
+                outline: none;
+                border-color: rgba(245,158,11,0.4);
+            }}
+            .of-import-actions {{
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                margin-top: 14px;
+            }}
+            .of-import-btn {{
+                padding: 9px 20px;
+                border-radius: 8px;
+                border: none;
+                background: linear-gradient(135deg, #f59e0b, #d97706);
+                color: #0f172a;
+                font-size: 0.88rem;
+                font-weight: 600;
+                cursor: pointer;
+                transition: all 0.15s;
+            }}
+            .of-import-btn:hover {{
+                filter: brightness(1.1);
+                transform: translateY(-1px);
+            }}
+            .of-import-btn:disabled {{
+                opacity: 0.4;
+                pointer-events: none;
+            }}
+            .of-import-status {{
+                font-size: 0.82rem;
+                color: #94a3b8;
+            }}
+            .of-import-status.success {{
+                color: #22c55e;
+            }}
+            .of-import-status.error {{
+                color: #ef4444;
+            }}
+            .of-divider {{
+                display: flex;
+                align-items: center;
+                gap: 16px;
+                margin: 8px 0 4px;
+                color: #64748b;
+                font-size: 0.78rem;
+                font-weight: 500;
+                text-transform: uppercase;
+                letter-spacing: 0.06em;
+            }}
+            .of-divider::before,
+            .of-divider::after {{
+                content: '';
+                flex: 1;
+                height: 1px;
+                background: rgba(148,163,184,0.1);
+            }}
+            /* Section-level import */
+            .of-sec-import-btn {{
+                margin-left: auto;
+                padding: 4px 10px;
+                font-size: 0.75rem;
+                color: #94a3b8;
+                background: rgba(148,163,184,0.08);
+                border: 1px solid rgba(148,163,184,0.12);
+                border-radius: 5px;
+                cursor: pointer;
+                display: inline-flex;
+                align-items: center;
+                gap: 4px;
+                transition: all 0.15s;
+            }}
+            .of-sec-import-btn:hover {{
+                color: #f59e0b;
+                border-color: rgba(245,158,11,0.25);
+                background: rgba(245,158,11,0.06);
+            }}
+            .of-sec-import-panel {{
+                display: none;
+                margin: 10px 0 14px;
+                padding: 12px;
+                background: rgba(15,23,42,0.4);
+                border: 1px solid rgba(148,163,184,0.1);
+                border-radius: 8px;
+            }}
+            .of-sec-import-panel.open {{ display: block; }}
+            .of-sec-import-panel textarea {{
+                width: 100%;
+                min-height: 64px;
+                padding: 8px 10px;
+                font-family: 'SF Mono', monospace;
+                font-size: 0.8rem;
+                color: #e2e8f0;
+                background: rgba(15,23,42,0.6);
+                border: 1px solid rgba(148,163,184,0.15);
+                border-radius: 6px;
+                resize: vertical;
+            }}
+            .of-sec-import-panel textarea:focus {{ border-color: rgba(245,158,11,0.4); outline: none; }}
+            .of-sec-import-actions {{
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                margin-top: 8px;
+            }}
+            .of-sec-import-apply {{
+                padding: 6px 14px;
+                font-size: 0.8rem;
+                font-weight: 500;
+                color: #0f172a;
+                background: #f59e0b;
+                border: none;
+                border-radius: 6px;
+                cursor: pointer;
+            }}
+            .of-sec-import-apply:hover {{ background: #eab308; }}
+            .of-sec-import-status {{
+                font-size: 0.78rem;
+                color: #64748b;
+            }}
+            .of-sec-import-status.success {{ color: #22c55e; }}
+            .of-sec-import-status.error {{ color: #ef4444; }}
         </style>
     </head>
     <body>
@@ -11149,6 +11364,73 @@ async def openflow_page():
 
             <div class="of-layout">
             <div class="of-main">
+
+            <!-- Flow Studio Header -->
+            <div class="of-studio-header">
+                {get_openflow_icon("24px", "#f59e0b")}
+                <span class="of-studio-title">Flow Studio</span>
+                <span class="of-studio-badge">Import &amp; Design</span>
+            </div>
+
+            <!-- Import Panel -->
+            <div class="of-import-panel" id="of-import-panel">
+                <div class="of-import-header">
+                    {get_material_icon('upload_file', '20px', '#f59e0b')}
+                    Import Existing Flow
+                </div>
+                <p style="color:#94a3b8;font-size:0.84rem;margin:0 0 14px;">
+                    Load a NiFi flow definition (JSON or YAML) to auto-populate the wizard, or paste a pipeline config to get started quickly.
+                </p>
+                <div class="of-import-modes">
+                    <button class="of-import-mode-btn active" onclick="ofSwitchImportMode('upload')" id="of-import-mode-upload">
+                        {get_material_icon('upload_file', '16px')} Upload File
+                    </button>
+                    <button class="of-import-mode-btn" onclick="ofSwitchImportMode('paste')" id="of-import-mode-paste">
+                        {get_material_icon('content_paste', '16px')} Paste JSON / YAML
+                    </button>
+                </div>
+
+                <!-- Upload mode -->
+                <div id="of-import-upload-area">
+                    <div class="of-import-dropzone" id="of-import-dropzone"
+                         onclick="document.getElementById('of-import-file').click()">
+                        <input type="file" id="of-import-file" accept=".json,.yaml,.yml" style="display:none" onchange="ofHandleFileUpload(event)">
+                        <div style="color:#94a3b8;margin-bottom:6px;">
+                            {get_material_icon('cloud_upload', '36px', '#64748b')}
+                        </div>
+                        <div style="color:#e2e8f0;font-size:0.9rem;font-weight:500;">Drop a .json or .yaml file here</div>
+                        <div style="color:#64748b;font-size:0.8rem;margin-top:4px;">or click to browse</div>
+                        <div style="color:#64748b;font-size:0.72rem;margin-top:8px;">
+                            Supports: NiFi Flow Definition JSON &bull; NiFi Flow YAML &bull; FLUX Config JSON
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Paste mode (hidden by default) -->
+                <div id="of-import-paste-area" style="display:none;">
+                    <textarea class="of-import-textarea" id="of-import-text"
+                              placeholder='Paste NiFi flow JSON, YAML, or a FLUX config object here...
+
+Example (FLUX config):
+{{
+  "template": "kafka",
+  "dest_db": "MY_DB",
+  "dest_schema": "PUBLIC",
+  "dest_table": "EVENTS",
+  "transforms": ["convert"],
+  "eai_hosts": "broker1:9092"
+}}'></textarea>
+                </div>
+
+                <div class="of-import-actions">
+                    <button class="of-import-btn" onclick="ofImportFlow()" id="of-import-btn">
+                        {get_material_icon('bolt', '18px')} Import &amp; Populate
+                    </button>
+                    <span class="of-import-status" id="of-import-status"></span>
+                </div>
+            </div>
+
+            <div class="of-divider">or build from a template</div>
 
             <!-- Step 1: Flow Template -->
             <div class="of-step-section" id="of-step-1">
@@ -11269,6 +11551,14 @@ async def openflow_page():
                 <div class="of-section-header">
                     <span class="of-section-num">2</span>
                     Source Configuration
+                    <button class="of-sec-import-btn" onclick="ofToggleSectionImport(2)">{get_material_icon('upload', '14px')} Import</button>
+                </div>
+                <div class="of-sec-import-panel" id="of-sec-import-2">
+                    <textarea id="of-sec-import-text-2" placeholder='{{"of_kafka_brokers":"broker1:9092","of_kafka_topic":"my-topic","of_kafka_group":"cg-1"}}'></textarea>
+                    <div class="of-sec-import-actions">
+                        <button class="of-sec-import-apply" onclick="ofApplySectionImport(2)">Apply</button>
+                        <span class="of-sec-import-status" id="of-sec-import-status-2"></span>
+                    </div>
                 </div>
                 <div id="of-source-panel">
                     <p style="color: #64748b; font-size: 0.9rem;">Source configuration will appear here based on your template selection.</p>
@@ -11324,6 +11614,14 @@ async def openflow_page():
                 <div class="of-section-header">
                     <span class="of-section-num">4</span>
                     Snowflake Destination
+                    <button class="of-sec-import-btn" onclick="ofToggleSectionImport(4)">{get_material_icon('upload', '14px')} Import</button>
+                </div>
+                <div class="of-sec-import-panel" id="of-sec-import-4">
+                    <textarea id="of-sec-import-text-4" placeholder='{{"of_dest_db":"ANALYTICS_DB","of_dest_schema":"RAW","of_dest_table":"EVENTS"}}'></textarea>
+                    <div class="of-sec-import-actions">
+                        <button class="of-sec-import-apply" onclick="ofApplySectionImport(4)">Apply</button>
+                        <span class="of-sec-import-status" id="of-sec-import-status-4"></span>
+                    </div>
                 </div>
                 <p style="color: #94a3b8; font-size: 0.85rem; margin: 0 0 4px;">
                     Select the target database, schema, and table for incoming data.
@@ -11373,6 +11671,14 @@ async def openflow_page():
                 <div class="of-section-header">
                     <span class="of-section-num">5</span>
                     Network &amp; Auth
+                    <button class="of-sec-import-btn" onclick="ofToggleSectionImport(5)">{get_material_icon('upload', '14px')} Import</button>
+                </div>
+                <div class="of-sec-import-panel" id="of-sec-import-5">
+                    <textarea id="of-sec-import-text-5" placeholder='{{"of_eai_name":"MY_EAI","of_eai_hosts":"broker1:9092,broker2:9092"}}'></textarea>
+                    <div class="of-sec-import-actions">
+                        <button class="of-sec-import-apply" onclick="ofApplySectionImport(5)">Apply</button>
+                        <span class="of-sec-import-status" id="of-sec-import-status-5"></span>
+                    </div>
                 </div>
                 <p style="color: #94a3b8; font-size: 0.85rem; margin: 0 0 12px;">
                     Configure External Access Integration (EAI) so Openflow on SPCS can reach external sources.
@@ -11491,6 +11797,335 @@ async def openflow_page():
             datagen: 'Data Generation',
             custom: 'Custom Flow',
         }};
+
+        // ── Flow Studio: Import Logic ──
+        let _ofImportRawText = '';
+
+        function ofSwitchImportMode(mode) {{
+            document.getElementById('of-import-mode-upload').classList.toggle('active', mode === 'upload');
+            document.getElementById('of-import-mode-paste').classList.toggle('active', mode === 'paste');
+            document.getElementById('of-import-upload-area').style.display = mode === 'upload' ? 'block' : 'none';
+            document.getElementById('of-import-paste-area').style.display = mode === 'paste' ? 'block' : 'none';
+            document.getElementById('of-import-status').textContent = '';
+            document.getElementById('of-import-status').className = 'of-import-status';
+        }}
+
+        // Drag-and-drop
+        (() => {{
+            const dz = document.getElementById('of-import-dropzone');
+            if (!dz) return;
+            dz.addEventListener('dragover', e => {{ e.preventDefault(); dz.classList.add('dragover'); }});
+            dz.addEventListener('dragleave', () => dz.classList.remove('dragover'));
+            dz.addEventListener('drop', e => {{
+                e.preventDefault();
+                dz.classList.remove('dragover');
+                const file = e.dataTransfer.files[0];
+                if (file) ofReadImportFile(file);
+            }});
+        }})();
+
+        function ofHandleFileUpload(e) {{
+            const file = e.target.files[0];
+            if (file) ofReadImportFile(file);
+        }}
+
+        function ofReadImportFile(file) {{
+            const status = document.getElementById('of-import-status');
+            const ext = file.name.split('.').pop().toLowerCase();
+            if (!['json', 'yaml', 'yml'].includes(ext)) {{
+                status.textContent = 'Unsupported file type. Use .json, .yaml, or .yml';
+                status.className = 'of-import-status error';
+                return;
+            }}
+            status.textContent = `Reading ${{file.name}}...`;
+            status.className = 'of-import-status';
+            const reader = new FileReader();
+            reader.onload = (ev) => {{
+                _ofImportRawText = ev.target.result;
+                status.textContent = `Loaded ${{file.name}} (${{(file.size / 1024).toFixed(1)}} KB) — click Import & Populate`;
+                status.className = 'of-import-status success';
+            }};
+            reader.onerror = () => {{
+                status.textContent = 'Failed to read file';
+                status.className = 'of-import-status error';
+            }};
+            reader.readAsText(file);
+        }}
+
+        async function ofImportFlow() {{
+            const status = document.getElementById('of-import-status');
+            // Determine source: file upload or paste
+            const pasteArea = document.getElementById('of-import-paste-area');
+            let rawText = '';
+            if (pasteArea && pasteArea.style.display !== 'none') {{
+                rawText = document.getElementById('of-import-text')?.value || '';
+            }} else {{
+                rawText = _ofImportRawText;
+            }}
+            if (!rawText.trim()) {{
+                status.textContent = 'No content to import. Upload a file or paste config.';
+                status.className = 'of-import-status error';
+                return;
+            }}
+            status.textContent = 'Parsing...';
+            status.className = 'of-import-status';
+            try {{
+                const resp = await fetch('/api/openflow/import', {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{ raw: rawText }}),
+                }});
+                const data = await resp.json();
+                if (data.error) {{
+                    status.textContent = data.error;
+                    status.className = 'of-import-status error';
+                    return;
+                }}
+                // Auto-populate wizard from parsed config
+                ofApplyImportedConfig(data.config);
+                const tplLabel = ofTemplateLabels[data.config.template] || data.config.template || 'Custom';
+                const dest = [data.config.dest_db, data.config.dest_schema, data.config.dest_table].filter(Boolean).join('.');
+                status.textContent = `Imported: ${{tplLabel}}${{dest ? ' → ' + dest : ''}} — review below and generate`;
+                status.className = 'of-import-status success';
+            }} catch (e) {{
+                status.textContent = 'Import failed: ' + e.message;
+                status.className = 'of-import-status error';
+            }}
+        }}
+
+        function ofApplyImportedConfig(cfg) {{
+            // 1. Select template
+            if (cfg.template && ofTemplateLabels[cfg.template]) {{
+                ofSelectTemplate(cfg.template);
+            }}
+
+            // 2. Fill source fields after a short delay (panel needs to render)
+            setTimeout(() => {{
+                // Source fields — set values if elements exist
+                const fieldMap = {{
+                    'of_kafka_brokers': cfg.source_brokers || cfg.eai_hosts || '',
+                    'of_kafka_topic': cfg.source_topic || '',
+                    'of_kafka_group': cfg.source_group || '',
+                    'of_kafka_security': cfg.source_security || '',
+                    'of_rest_url': cfg.source_url || '',
+                    'of_rest_method': cfg.source_method || '',
+                    'of_rest_headers': cfg.source_headers || '',
+                    'of_rest_schedule': cfg.source_schedule || '',
+                    'of_cdc_engine': cfg.source_cdc_engine || '',
+                    'of_cdc_url': cfg.source_cdc_url || '',
+                    'of_cdc_tables': cfg.source_cdc_tables || '',
+                    'of_files_provider': cfg.source_files_provider || '',
+                    'of_files_bucket': cfg.source_bucket || '',
+                    'of_files_prefix': cfg.source_prefix || '',
+                    'of_datagen_schema': cfg.source_schema_def || '',
+                    'of_datagen_batch': cfg.source_batch_size || '',
+                    'of_datagen_interval': cfg.source_interval || '',
+                }};
+                for (const [id, val] of Object.entries(fieldMap)) {{
+                    const el = document.getElementById(id);
+                    if (el && val) {{
+                        if (el.tagName === 'SELECT') {{
+                            // Try to set matching option
+                            for (const opt of el.options) {{
+                                if (opt.value.toLowerCase() === val.toLowerCase()) {{
+                                    el.value = opt.value;
+                                    break;
+                                }}
+                            }}
+                        }} else if (el.tagName === 'TEXTAREA') {{
+                            el.value = val;
+                        }} else {{
+                            el.value = val;
+                        }}
+                    }}
+                }}
+
+                // 3. Auto-validate source to unlock step 3
+                if (cfg.template && cfg.template !== 'custom') {{
+                    ofState.sourceValid = true;
+                    ofUnlockStep(3);
+                }}
+
+                // 4. Set transforms
+                if (cfg.transforms && cfg.transforms.length > 0) {{
+                    ofUnlockStep(3);
+                    setTimeout(() => {{
+                        cfg.transforms.forEach(t => {{
+                            const cb = document.getElementById('of_transform_' + t);
+                            if (cb && !cb.checked) cb.click();
+                        }});
+                    }}, 100);
+                }}
+
+                // 5. Set destination fields
+                if (cfg.dest_db || cfg.dest_schema || cfg.dest_table) {{
+                    ofUnlockStep(4);
+                    setTimeout(() => {{
+                        // Trigger database load and set values
+                        ofLoadDatabases();
+                        setTimeout(() => {{
+                            if (cfg.dest_db) {{
+                                const dbSel = document.getElementById('of_dest_db');
+                                if (dbSel) {{
+                                    // Add option if not present
+                                    let found = false;
+                                    for (const opt of dbSel.options) {{
+                                        if (opt.value === cfg.dest_db) {{ found = true; break; }}
+                                    }}
+                                    if (!found) {{
+                                        const opt = document.createElement('option');
+                                        opt.value = cfg.dest_db;
+                                        opt.textContent = cfg.dest_db;
+                                        dbSel.appendChild(opt);
+                                    }}
+                                    dbSel.value = cfg.dest_db;
+                                    // Trigger schema load
+                                    if (typeof ofLoadSchemas === 'function') ofLoadSchemas(cfg.dest_db);
+                                }}
+                            }}
+                            setTimeout(() => {{
+                                if (cfg.dest_schema) {{
+                                    const sSel = document.getElementById('of_dest_schema');
+                                    if (sSel) {{
+                                        let found = false;
+                                        for (const opt of sSel.options) {{
+                                            if (opt.value === cfg.dest_schema) {{ found = true; break; }}
+                                        }}
+                                        if (!found) {{
+                                            const opt = document.createElement('option');
+                                            opt.value = cfg.dest_schema;
+                                            opt.textContent = cfg.dest_schema;
+                                            sSel.appendChild(opt);
+                                        }}
+                                        sSel.value = cfg.dest_schema;
+                                    }}
+                                }}
+                                if (cfg.dest_table) {{
+                                    const tEl = document.getElementById('of_dest_table');
+                                    if (tEl) tEl.value = cfg.dest_table;
+                                }}
+                                if (cfg.dest_method) {{
+                                    const mSel = document.getElementById('of_dest_method');
+                                    if (mSel) mSel.value = cfg.dest_method;
+                                }}
+                            }}, 300);
+                        }}, 300);
+                    }}, 100);
+                }}
+
+                // 6. Set EAI / network fields
+                if (cfg.eai_name || cfg.eai_hosts || cfg.secret_name) {{
+                    ofUnlockStep(5);
+                    setTimeout(() => {{
+                        if (cfg.eai_name) {{
+                            const el = document.getElementById('of_eai_name');
+                            if (el) el.value = cfg.eai_name;
+                        }}
+                        if (cfg.eai_hosts) {{
+                            const el = document.getElementById('of_eai_hosts');
+                            if (el) el.value = cfg.eai_hosts;
+                        }}
+                        if (cfg.network_rule) {{
+                            const el = document.getElementById('of_net_rule');
+                            if (el) el.value = cfg.network_rule;
+                        }}
+                        if (cfg.secret_name) {{
+                            const el = document.getElementById('of_secret_name');
+                            if (el) el.value = cfg.secret_name;
+                        }}
+                    }}, 200);
+                }}
+
+                // 7. Unlock step 6 and scroll to review
+                setTimeout(() => {{
+                    ofUnlockStep(5);
+                    ofUnlockStep(6);
+                    document.getElementById('of-step-6')?.scrollIntoView({{ behavior: 'smooth', block: 'start' }});
+                }}, 800);
+
+            }}, 150);
+        }}
+
+        // ── Section-level import ──
+        function ofToggleSectionImport(step) {{
+            const panel = document.getElementById('of-sec-import-' + step);
+            if (panel) panel.classList.toggle('open');
+        }}
+
+        function ofApplySectionImport(step) {{
+            const status = document.getElementById('of-sec-import-status-' + step);
+            const textarea = document.getElementById('of-sec-import-text-' + step);
+            if (!textarea || !textarea.value.trim()) {{
+                status.textContent = 'Paste a JSON snippet first';
+                status.className = 'of-sec-import-status error';
+                return;
+            }}
+            let data;
+            try {{
+                data = JSON.parse(textarea.value.trim());
+            }} catch (e) {{
+                status.textContent = 'Invalid JSON: ' + e.message;
+                status.className = 'of-sec-import-status error';
+                return;
+            }}
+
+            // Step 2: auto-detect template from field prefixes if none selected
+            if (step === 2 && !ofState.template) {{
+                const keys = Object.keys(data).join(' ');
+                const prefixMap = {{ kafka: 'of_kafka_', rest: 'of_rest_', cdc: 'of_cdc_', file: 'of_file_', datagen: 'of_dg_' }};
+                for (const [tpl, pfx] of Object.entries(prefixMap)) {{
+                    if (keys.includes(pfx)) {{
+                        const resolvedTpl = tpl === 'file' ? 'files' : tpl;
+                        ofSelectTemplate(resolvedTpl);
+                        break;
+                    }}
+                }}
+                if (!ofState.template) {{
+                    status.textContent = 'Could not detect template — select one first or use of_kafka_*, of_rest_*, etc. field prefixes';
+                    status.className = 'of-sec-import-status error';
+                    return;
+                }}
+            }}
+
+            // Step 4: unlock dest step if locked
+            if (step === 4) {{
+                ofUnlockStep(4);
+            }}
+            // Step 5: unlock network step if locked
+            if (step === 5) {{
+                ofUnlockStep(5);
+            }}
+
+            // Apply field values after a short delay (allows panels to render)
+            setTimeout(() => {{
+                let count = 0;
+                for (const [id, val] of Object.entries(data)) {{
+                    const el = document.getElementById(id);
+                    if (el && val !== undefined && val !== null) {{
+                        const v = String(val);
+                        if (el.tagName === 'SELECT') {{
+                            for (const opt of el.options) {{
+                                if (opt.value.toLowerCase() === v.toLowerCase()) {{
+                                    el.value = opt.value;
+                                    count++;
+                                    break;
+                                }}
+                            }}
+                        }} else {{
+                            el.value = v;
+                            count++;
+                        }}
+                    }}
+                }}
+                if (count > 0) {{
+                    status.textContent = `Applied ${{count}} field(s)`;
+                    status.className = 'of-sec-import-status success';
+                }} else {{
+                    status.textContent = 'No matching fields found — check field IDs';
+                    status.className = 'of-sec-import-status error';
+                }}
+            }}, 150);
+        }}
 
         // ── Form field helper ──
         function ofField(id, label, placeholder, type='text', opts) {{
@@ -12369,6 +13004,224 @@ async def openflow_generate(request: Request):
 
     except Exception as e:
         return {"error": str(e)}
+
+
+@app.post("/api/openflow/import")
+async def openflow_import(request: Request):
+    """Parse an imported NiFi flow definition (JSON/YAML) or FLUX config and return a normalized wizard config."""
+    try:
+        body = await request.json()
+        raw = body.get("raw", "").strip()
+        if not raw:
+            return {"error": "No content provided"}
+
+        # Try to parse as JSON first
+        parsed = None
+        try:
+            import json as _json
+            parsed = _json.loads(raw)
+        except (ValueError, _json.JSONDecodeError):
+            pass
+
+        # Try YAML if JSON failed
+        if parsed is None:
+            try:
+                import yaml
+                parsed = yaml.safe_load(raw)
+            except Exception:
+                pass
+
+        if parsed is None or not isinstance(parsed, dict):
+            return {"error": "Could not parse input as JSON or YAML. Provide a valid NiFi flow definition or FLUX config object."}
+
+        config = {}
+
+        # ── Detect format: NiFi flow definition vs FLUX config ──
+
+        if "flowContents" in parsed:
+            # NiFi flow definition format
+            fc = parsed["flowContents"]
+            processors = fc.get("processors", [])
+            connections = fc.get("connections", [])
+            controller_services = fc.get("controllerServices", [])
+
+            # Detect template from processor types
+            proc_types = [p.get("type", "") for p in processors]
+            proc_types_lower = " ".join(proc_types).lower()
+
+            if "consumekafka" in proc_types_lower:
+                config["template"] = "kafka"
+            elif "invokehttp" in proc_types_lower:
+                config["template"] = "rest"
+            elif "cdc" in proc_types_lower or "capturechange" in proc_types_lower:
+                config["template"] = "cdc"
+            elif "lists3" in proc_types_lower or "listgcs" in proc_types_lower or "fetchs3" in proc_types_lower:
+                config["template"] = "files"
+            elif "generatejson" in proc_types_lower or "generateflowfile" in proc_types_lower:
+                config["template"] = "datagen"
+            else:
+                config["template"] = "custom"
+
+            # Extract source config from processor properties
+            for p in processors:
+                ptype = p.get("type", "").lower()
+                props = p.get("properties", {})
+
+                # Kafka source
+                if "consumekafka" in ptype:
+                    config["source_brokers"] = props.get("bootstrap.servers", props.get("Kafka Brokers", ""))
+                    config["source_topic"] = props.get("topic", props.get("Topic Name(s)", ""))
+                    config["source_group"] = props.get("group.id", props.get("Group ID", ""))
+                    config["source_security"] = props.get("security.protocol", props.get("Security Protocol", ""))
+
+                # REST source
+                elif "invokehttp" in ptype:
+                    config["source_url"] = props.get("Remote URL", props.get("url", ""))
+                    config["source_method"] = props.get("HTTP Method", "GET")
+
+                # Data generation
+                elif "generatejson" in ptype:
+                    config["source_schema_def"] = props.get("JSON Schema", props.get("json-schema", ""))
+                    config["source_batch_size"] = props.get("Batch Size", "")
+
+                # File processing
+                elif "lists3" in ptype or "listgcs" in ptype:
+                    config["source_bucket"] = props.get("Bucket", props.get("bucket", ""))
+                    config["source_prefix"] = props.get("Prefix", props.get("prefix", ""))
+                    if "gcs" in ptype:
+                        config["source_files_provider"] = "gcs"
+                    else:
+                        config["source_files_provider"] = "s3"
+
+                # Snowflake destination
+                elif "putsnowpipestreaming" in ptype:
+                    config["dest_method"] = "snowpipe_streaming"
+                    db_val = props.get("Database", "")
+                    schema_val = props.get("Schema", "")
+                    table_val = props.get("Table", props.get("Table Name", ""))
+                    if db_val:
+                        config["dest_db"] = db_val
+                    if schema_val:
+                        config["dest_schema"] = schema_val
+                    if table_val:
+                        config["dest_table"] = table_val
+
+                elif "updatesnowflakedatabase" in ptype or "putdatabaserecord" in ptype:
+                    config["dest_method"] = "update_db"
+                    table_val = props.get("Table Name", props.get("table-name", ""))
+                    if table_val:
+                        config["dest_table"] = table_val
+
+            # Detect transforms from processor types
+            transforms = []
+            for p in processors:
+                ptype = p.get("type", "").lower()
+                if "convertrecord" in ptype:
+                    transforms.append("convert")
+                elif "jolttransform" in ptype:
+                    transforms.append("jolt")
+                elif "routeonattribute" in ptype:
+                    transforms.append("filter")
+                elif "updateattribute" in ptype:
+                    transforms.append("enrich")
+            if transforms:
+                config["transforms"] = list(dict.fromkeys(transforms))  # dedupe preserving order
+
+            # Extract parameter context name for reference
+            pc_name = fc.get("parameterContextName", "")
+            if pc_name:
+                config["_parameter_context"] = pc_name
+
+            # Component summary for UI feedback
+            config["_summary"] = {
+                "processors": len(processors),
+                "connections": len(connections),
+                "controller_services": len(controller_services),
+                "name": fc.get("name", "Imported Flow"),
+            }
+
+        elif "template" in parsed:
+            # FLUX config format — pass through directly
+            valid_keys = [
+                "template", "dest_db", "dest_schema", "dest_table", "dest_method",
+                "transforms", "eai_name", "eai_hosts", "network_rule", "secret_name",
+                "source_brokers", "source_topic", "source_group", "source_security",
+                "source_url", "source_method", "source_headers", "source_schedule",
+                "source_cdc_engine", "source_cdc_url", "source_cdc_tables",
+                "source_files_provider", "source_bucket", "source_prefix",
+                "source_schema_def", "source_batch_size", "source_interval",
+            ]
+            for k in valid_keys:
+                if k in parsed:
+                    config[k] = parsed[k]
+
+        elif "processors" in parsed:
+            # Bare flowContents (no wrapper) — treat as NiFi format
+            return await openflow_import_inner({"flowContents": parsed})
+
+        else:
+            return {"error": "Unrecognized format. Expected a NiFi flow definition (with flowContents) or a FLUX config (with template)."}
+
+        # Default template if not detected
+        if "template" not in config:
+            config["template"] = "custom"
+
+        return {"config": config}
+
+    except Exception as e:
+        return {"error": f"Import failed: {str(e)}"}
+
+
+async def openflow_import_inner(parsed: dict):
+    """Handle bare flowContents (no wrapper) by treating as NiFi format."""
+    fc = parsed.get("flowContents", parsed)
+    processors = fc.get("processors", [])
+    connections = fc.get("connections", [])
+    controller_services = fc.get("controllerServices", [])
+
+    config = {}
+    proc_types = [p.get("type", "") for p in processors]
+    proc_types_lower = " ".join(proc_types).lower()
+
+    if "consumekafka" in proc_types_lower:
+        config["template"] = "kafka"
+    elif "invokehttp" in proc_types_lower:
+        config["template"] = "rest"
+    elif "cdc" in proc_types_lower or "capturechange" in proc_types_lower:
+        config["template"] = "cdc"
+    elif "lists3" in proc_types_lower or "listgcs" in proc_types_lower:
+        config["template"] = "files"
+    elif "generatejson" in proc_types_lower:
+        config["template"] = "datagen"
+    else:
+        config["template"] = "custom"
+
+    # Extract dest from Snowflake processors
+    for p in processors:
+        ptype = p.get("type", "").lower()
+        props = p.get("properties", {})
+        if "putsnowpipestreaming" in ptype:
+            config["dest_method"] = "snowpipe_streaming"
+            if props.get("Database"):
+                config["dest_db"] = props["Database"]
+            if props.get("Schema"):
+                config["dest_schema"] = props["Schema"]
+            if props.get("Table") or props.get("Table Name"):
+                config["dest_table"] = props.get("Table", props.get("Table Name", ""))
+        elif "updatesnowflakedatabase" in ptype:
+            config["dest_method"] = "update_db"
+
+    config["_summary"] = {
+        "processors": len(processors),
+        "connections": len(connections),
+        "controller_services": len(controller_services),
+        "name": fc.get("name", "Imported Flow"),
+    }
+
+    if "template" not in config:
+        config["template"] = "custom"
+
+    return {"config": config}
 
 
 def create_streaming_task_sql(database: str, schema: str, task_name: str, table_name: str, 
