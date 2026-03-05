@@ -11554,11 +11554,13 @@ Example (FLUX config):
                     <button class="of-sec-import-btn" onclick="ofToggleSectionImport(2)">{get_material_icon('upload', '14px')} Import</button>
                 </div>
                 <div class="of-sec-import-panel" id="of-sec-import-2">
-                    <textarea id="of-sec-import-text-2" placeholder='{{"of_kafka_brokers":"broker1:9092","of_kafka_topic":"my-topic","of_kafka_group":"cg-1"}}'></textarea>
+                    <textarea id="of-sec-import-text-2" placeholder='Endpoint=sb://my-namespace.servicebus.windows.net/;SharedAccessKeyName=listen-policy;SharedAccessKey=abc123...;EntityPath=my-eventhub'></textarea>
+                    <p style="color:#64748b;font-size:0.75rem;margin:6px 0 2px;">Accepts: Azure Event Hub connection string &bull; Kafka properties (key=value lines) &bull; Confluent Cloud config &bull; JSON</p>
                     <div class="of-sec-import-actions">
                         <button class="of-sec-import-apply" onclick="ofApplySectionImport(2)">Apply</button>
                         <span class="of-sec-import-status" id="of-sec-import-status-2"></span>
                     </div>
+                    <div id="of-sec-import-guide-2" style="display:none;margin-top:10px;padding:10px;border-radius:6px;background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.15);color:#94a3b8;font-size:0.78rem;line-height:1.5;"></div>
                 </div>
                 <div id="of-source-panel">
                     <p style="color: #64748b; font-size: 0.9rem;">Source configuration will appear here based on your template selection.</p>
@@ -11617,11 +11619,13 @@ Example (FLUX config):
                     <button class="of-sec-import-btn" onclick="ofToggleSectionImport(4)">{get_material_icon('upload', '14px')} Import</button>
                 </div>
                 <div class="of-sec-import-panel" id="of-sec-import-4">
-                    <textarea id="of-sec-import-text-4" placeholder='{{"of_dest_db":"ANALYTICS_DB","of_dest_schema":"RAW","of_dest_table":"EVENTS"}}'></textarea>
+                    <textarea id="of-sec-import-text-4" placeholder='{{"database":"ANALYTICS_DB","schema":"RAW","table":"EVENTS"}}'></textarea>
+                    <p style="color:#64748b;font-size:0.75rem;margin:6px 0 2px;">Accepts: JSON with database, schema, table &bull; or internal field IDs</p>
                     <div class="of-sec-import-actions">
                         <button class="of-sec-import-apply" onclick="ofApplySectionImport(4)">Apply</button>
                         <span class="of-sec-import-status" id="of-sec-import-status-4"></span>
                     </div>
+                    <div id="of-sec-import-guide-4" style="display:none;margin-top:10px;padding:10px;border-radius:6px;background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.15);color:#94a3b8;font-size:0.78rem;line-height:1.5;"></div>
                 </div>
                 <p style="color: #94a3b8; font-size: 0.85rem; margin: 0 0 4px;">
                     Select the target database, schema, and table for incoming data.
@@ -11674,11 +11678,13 @@ Example (FLUX config):
                     <button class="of-sec-import-btn" onclick="ofToggleSectionImport(5)">{get_material_icon('upload', '14px')} Import</button>
                 </div>
                 <div class="of-sec-import-panel" id="of-sec-import-5">
-                    <textarea id="of-sec-import-text-5" placeholder='{{"of_eai_name":"MY_EAI","of_eai_hosts":"broker1:9092,broker2:9092"}}'></textarea>
+                    <textarea id="of-sec-import-text-5" placeholder='{{"eai_name":"MY_EAI","hosts":"broker1:9092,broker2:9092","secret_name":"MY_KAFKA_SECRET"}}'></textarea>
+                    <p style="color:#64748b;font-size:0.75rem;margin:6px 0 2px;">Accepts: JSON with eai_name, hosts, secret_name &bull; or internal field IDs</p>
                     <div class="of-sec-import-actions">
                         <button class="of-sec-import-apply" onclick="ofApplySectionImport(5)">Apply</button>
                         <span class="of-sec-import-status" id="of-sec-import-status-5"></span>
                     </div>
+                    <div id="of-sec-import-guide-5" style="display:none;margin-top:10px;padding:10px;border-radius:6px;background:rgba(245,158,11,0.06);border:1px solid rgba(245,158,11,0.15);color:#94a3b8;font-size:0.78rem;line-height:1.5;"></div>
                 </div>
                 <p style="color: #94a3b8; font-size: 0.85rem; margin: 0 0 12px;">
                     Configure External Access Integration (EAI) so Openflow on SPCS can reach external sources.
@@ -12052,79 +12058,83 @@ Example (FLUX config):
             if (panel) panel.classList.toggle('open');
         }}
 
-        function ofApplySectionImport(step) {{
+        async function ofApplySectionImport(step) {{
             const status = document.getElementById('of-sec-import-status-' + step);
             const textarea = document.getElementById('of-sec-import-text-' + step);
             if (!textarea || !textarea.value.trim()) {{
-                status.textContent = 'Paste a JSON snippet first';
+                status.textContent = 'Paste a config snippet first';
                 status.className = 'of-sec-import-status error';
                 return;
             }}
-            let data;
-            try {{
-                data = JSON.parse(textarea.value.trim());
-            }} catch (e) {{
-                status.textContent = 'Invalid JSON: ' + e.message;
-                status.className = 'of-sec-import-status error';
-                return;
-            }}
+            status.textContent = 'Parsing...';
+            status.className = 'of-sec-import-status';
 
-            // Step 2: auto-detect template from field prefixes if none selected
-            if (step === 2 && !ofState.template) {{
-                const keys = Object.keys(data).join(' ');
-                const prefixMap = {{ kafka: 'of_kafka_', rest: 'of_rest_', cdc: 'of_cdc_', file: 'of_file_', datagen: 'of_dg_' }};
-                for (const [tpl, pfx] of Object.entries(prefixMap)) {{
-                    if (keys.includes(pfx)) {{
-                        const resolvedTpl = tpl === 'file' ? 'files' : tpl;
-                        ofSelectTemplate(resolvedTpl);
-                        break;
-                    }}
-                }}
-                if (!ofState.template) {{
-                    status.textContent = 'Could not detect template — select one first or use of_kafka_*, of_rest_*, etc. field prefixes';
+            try {{
+                const resp = await fetch('/api/openflow/import-section', {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{ step: step, raw: textarea.value.trim() }}),
+                }});
+                const data = await resp.json();
+                if (data.error) {{
+                    status.textContent = data.error;
                     status.className = 'of-sec-import-status error';
                     return;
                 }}
-            }}
 
-            // Step 4: unlock dest step if locked
-            if (step === 4) {{
-                ofUnlockStep(4);
-            }}
-            // Step 5: unlock network step if locked
-            if (step === 5) {{
-                ofUnlockStep(5);
-            }}
+                // Auto-select template if detected (Step 2)
+                if (step === 2 && data.template && !ofState.template) {{
+                    ofSelectTemplate(data.template);
+                }}
 
-            // Apply field values after a short delay (allows panels to render)
-            setTimeout(() => {{
-                let count = 0;
-                for (const [id, val] of Object.entries(data)) {{
-                    const el = document.getElementById(id);
-                    if (el && val !== undefined && val !== null) {{
-                        const v = String(val);
-                        if (el.tagName === 'SELECT') {{
-                            for (const opt of el.options) {{
-                                if (opt.value.toLowerCase() === v.toLowerCase()) {{
-                                    el.value = opt.value;
-                                    count++;
-                                    break;
+                // Unlock step if locked
+                if (step === 4) ofUnlockStep(4);
+                if (step === 5) ofUnlockStep(5);
+
+                // Apply field values after a short delay (allows panels to render)
+                setTimeout(() => {{
+                    let count = 0;
+                    for (const [id, val] of Object.entries(data.fields || {{}})) {{
+                        const el = document.getElementById(id);
+                        if (el && val) {{
+                            const v = String(val);
+                            if (el.tagName === 'SELECT') {{
+                                for (const opt of el.options) {{
+                                    if (opt.value.toLowerCase() === v.toLowerCase()) {{
+                                        el.value = opt.value;
+                                        count++;
+                                        break;
+                                    }}
                                 }}
+                            }} else {{
+                                el.value = v;
+                                count++;
                             }}
-                        }} else {{
-                            el.value = v;
-                            count++;
                         }}
                     }}
-                }}
-                if (count > 0) {{
-                    status.textContent = `Applied ${{count}} field(s)`;
-                    status.className = 'of-sec-import-status success';
-                }} else {{
-                    status.textContent = 'No matching fields found — check field IDs';
-                    status.className = 'of-sec-import-status error';
-                }}
-            }}, 150);
+                    const provider = data.provider ? ` (${{data.provider}})` : '';
+                    if (count > 0) {{
+                        status.textContent = `Applied ${{count}} field(s)${{provider}}`;
+                        status.className = 'of-sec-import-status success';
+                    }} else {{
+                        status.textContent = 'No matching fields found';
+                        status.className = 'of-sec-import-status error';
+                    }}
+
+                    // Show guidance if available
+                    if (data.guidance) {{
+                        const guideEl = document.getElementById('of-sec-import-guide-' + step);
+                        if (guideEl) {{
+                            guideEl.innerHTML = `<strong>${{data.guidance.title}}</strong><ol style="margin:4px 0 0 16px;padding:0;font-size:0.78rem;color:#94a3b8;">${{data.guidance.steps.map(s => '<li>' + s + '</li>').join('')}}</ol>`;
+                            guideEl.style.display = 'block';
+                        }}
+                    }}
+                }}, 200);
+
+            }} catch (e) {{
+                status.textContent = 'Import failed: ' + e.message;
+                status.className = 'of-sec-import-status error';
+            }}
         }}
 
         // ── Form field helper ──
@@ -13222,6 +13232,246 @@ async def openflow_import_inner(parsed: dict):
         config["template"] = "custom"
 
     return {"config": config}
+
+
+@app.post("/api/openflow/import-section")
+async def openflow_import_section(request: Request):
+    """Parse a native config snippet (Event Hub connection string, Kafka properties, or JSON)
+    for a specific wizard step and return a normalized field map."""
+    import re as _re
+    import json as _json
+
+    try:
+        body = await request.json()
+        step = body.get("step")
+        raw = body.get("raw", "").strip()
+        if not raw:
+            return {"error": "No content provided"}
+        if step not in (2, 4, 5):
+            return {"error": "Unsupported step. Use 2 (Source), 4 (Destination), or 5 (Network & Auth)."}
+
+        fields = {}
+        detected_template = None
+        provider_hint = None
+
+        # ── Format detection ──
+
+        # 1) Azure Event Hub connection string
+        #    Endpoint=sb://<ns>.servicebus.windows.net/;SharedAccessKeyName=...;SharedAccessKey=...;EntityPath=...
+        if raw.startswith("Endpoint=sb://") or raw.startswith("endpoint=sb://"):
+            parts = {}
+            for segment in raw.split(";"):
+                segment = segment.strip()
+                if "=" in segment:
+                    k, v = segment.split("=", 1)
+                    parts[k.strip().lower()] = v.strip()
+            # Extract namespace host from Endpoint
+            ep = parts.get("endpoint", "")
+            # ep looks like "sb://mynamespace.servicebus.windows.net/"
+            host_match = _re.search(r"sb://([^/]+)", ep)
+            host = host_match.group(1) if host_match else ""
+            entity_path = parts.get("entitypath", "")
+            sas_key_name = parts.get("sharedaccesskeyname", "")
+
+            if step == 2:
+                # Event Hubs use Kafka protocol on port 9093 with SASL_SSL
+                detected_template = "kafka"
+                fields["of_kafka_brokers"] = f"{host}:9093" if host else ""
+                fields["of_kafka_topic"] = entity_path
+                fields["of_kafka_group"] = "openflow-consumer-1"
+                fields["of_kafka_security"] = "SASL_SSL"
+                provider_hint = "Azure Event Hubs"
+            elif step == 5:
+                fields["of_eai_hosts"] = f"{host}:9093" if host else ""
+                fields["of_eai_name"] = "OPENFLOW_EAI"
+                provider_hint = "Azure Event Hubs"
+            elif step == 4:
+                return {"error": "Event Hub connection strings are for source/network config (Steps 2 or 5), not destination."}
+
+        # 2) Kafka properties format (key=value lines)
+        #    bootstrap.servers=broker1:9092
+        #    topic=my-topic
+        elif not raw.startswith("{") and "=" in raw and "\n" in raw:
+            props = {}
+            for line in raw.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    props[k.strip()] = v.strip()
+
+            if step == 2:
+                kafka_keys = {"bootstrap.servers", "topic", "group.id", "security.protocol", "sasl.mechanism"}
+                if props.keys() & kafka_keys:
+                    detected_template = "kafka"
+                    fields["of_kafka_brokers"] = props.get("bootstrap.servers", "")
+                    fields["of_kafka_topic"] = props.get("topic", props.get("topic.name", ""))
+                    fields["of_kafka_group"] = props.get("group.id", "openflow-consumer-1")
+                    sec = props.get("security.protocol", "")
+                    if sec:
+                        fields["of_kafka_security"] = sec
+                    schema_reg = props.get("schema.registry.url", "")
+                    if schema_reg:
+                        fields["of_kafka_schema_reg"] = schema_reg
+                    provider_hint = "Kafka properties"
+                else:
+                    # Could be REST or other — check for url/method keys
+                    if "url" in props or "endpoint" in props:
+                        detected_template = "rest"
+                        fields["of_rest_url"] = props.get("url", props.get("endpoint", ""))
+                        fields["of_rest_method"] = props.get("method", "GET")
+                        provider_hint = "REST API properties"
+                    else:
+                        return {"error": "Could not detect source type from properties. Include bootstrap.servers (Kafka) or url (REST)."}
+
+            elif step == 5:
+                hosts = props.get("bootstrap.servers", props.get("allowed_hosts", ""))
+                if hosts:
+                    fields["of_eai_hosts"] = hosts
+                fields["of_eai_name"] = props.get("eai_name", "OPENFLOW_EAI")
+                provider_hint = "Kafka properties"
+
+            elif step == 4:
+                fields["of_dest_db"] = props.get("database", props.get("db", ""))
+                fields["of_dest_schema"] = props.get("schema", "")
+                fields["of_dest_table"] = props.get("table", props.get("table_name", ""))
+                provider_hint = "properties"
+
+        # 3) JSON format
+        elif raw.startswith("{"):
+            try:
+                data = _json.loads(raw)
+            except _json.JSONDecodeError as e:
+                return {"error": f"Invalid JSON: {e}"}
+
+            if step == 2:
+                # Accept Kafka-standard keys or of_kafka_* keys
+                bs = data.get("bootstrap.servers", data.get("bootstrap_servers", data.get("of_kafka_brokers", "")))
+                topic = data.get("topic", data.get("topic.name", data.get("of_kafka_topic", "")))
+                group = data.get("group.id", data.get("group_id", data.get("of_kafka_group", "")))
+                sec = data.get("security.protocol", data.get("security_protocol", data.get("of_kafka_security", "")))
+                schema_reg = data.get("schema.registry.url", data.get("schema_registry_url", data.get("of_kafka_schema_reg", "")))
+
+                # REST keys
+                url = data.get("url", data.get("endpoint", data.get("of_rest_url", "")))
+                method = data.get("method", data.get("http_method", data.get("of_rest_method", "")))
+
+                # CDC keys
+                jdbc = data.get("jdbc_url", data.get("of_cdc_url", ""))
+                cdc_tables = data.get("tables", data.get("of_cdc_tables", ""))
+
+                if bs or topic:
+                    detected_template = "kafka"
+                    fields["of_kafka_brokers"] = bs
+                    fields["of_kafka_topic"] = topic
+                    fields["of_kafka_group"] = group or "openflow-consumer-1"
+                    if sec:
+                        fields["of_kafka_security"] = sec
+                    if schema_reg:
+                        fields["of_kafka_schema_reg"] = schema_reg
+                    provider_hint = "Kafka JSON"
+                elif url:
+                    detected_template = "rest"
+                    fields["of_rest_url"] = url
+                    fields["of_rest_method"] = method or "GET"
+                    fields["of_rest_headers"] = data.get("headers", data.get("of_rest_headers", ""))
+                    fields["of_rest_schedule"] = data.get("schedule", data.get("of_rest_schedule", ""))
+                    provider_hint = "REST API JSON"
+                elif jdbc or cdc_tables:
+                    detected_template = "cdc"
+                    fields["of_cdc_url"] = jdbc
+                    fields["of_cdc_tables"] = cdc_tables
+                    fields["of_cdc_dbtype"] = data.get("db_type", data.get("of_cdc_dbtype", ""))
+                    provider_hint = "CDC JSON"
+                else:
+                    # Fall back: try to map any of_* keys directly
+                    for k, v in data.items():
+                        if k.startswith("of_"):
+                            fields[k] = str(v) if v is not None else ""
+                    # Detect template from of_* prefixes
+                    key_str = " ".join(fields.keys())
+                    for tpl, pfx in [("kafka", "of_kafka_"), ("rest", "of_rest_"), ("cdc", "of_cdc_"), ("files", "of_file_"), ("datagen", "of_dg_")]:
+                        if pfx in key_str:
+                            detected_template = tpl
+                            break
+                    provider_hint = "JSON"
+
+            elif step == 4:
+                fields["of_dest_db"] = data.get("database", data.get("db", data.get("of_dest_db", "")))
+                fields["of_dest_schema"] = data.get("schema", data.get("of_dest_schema", ""))
+                fields["of_dest_table"] = data.get("table", data.get("table_name", data.get("of_dest_table", "")))
+                fields["of_dest_method"] = data.get("write_method", data.get("method", data.get("of_dest_method", "")))
+                fields["of_dest_new_table"] = data.get("new_table", data.get("of_dest_new_table", ""))
+                provider_hint = "JSON"
+
+            elif step == 5:
+                fields["of_eai_name"] = data.get("eai_name", data.get("of_eai_name", "OPENFLOW_EAI"))
+                fields["of_eai_hosts"] = data.get("allowed_hosts", data.get("hosts", data.get("of_eai_hosts", "")))
+                fields["of_net_rule"] = data.get("network_rule", data.get("of_net_rule", ""))
+                fields["of_secret_name"] = data.get("secret_name", data.get("secret", data.get("of_secret_name", "")))
+                provider_hint = "JSON"
+
+        # 4) Single-line key=value (e.g. bootstrap.servers=broker:9092)
+        elif "=" in raw and "\n" not in raw and not raw.startswith("Endpoint"):
+            k, v = raw.split("=", 1)
+            k, v = k.strip(), v.strip()
+            if step == 2:
+                if k in ("bootstrap.servers", "bootstrap_servers"):
+                    detected_template = "kafka"
+                    fields["of_kafka_brokers"] = v
+                    provider_hint = "Kafka bootstrap servers"
+                elif k in ("url", "endpoint"):
+                    detected_template = "rest"
+                    fields["of_rest_url"] = v
+                    provider_hint = "REST URL"
+            elif step == 5:
+                fields["of_eai_hosts"] = v
+                provider_hint = "single value"
+
+        else:
+            return {"error": "Unrecognized format. Paste an Event Hub connection string, Kafka properties (key=value), or JSON."}
+
+        # Strip empty values
+        fields = {k: v for k, v in fields.items() if v}
+        if not fields:
+            return {"error": "Could not extract any configuration from the input."}
+
+        result = {"fields": fields}
+        if detected_template:
+            result["template"] = detected_template
+        if provider_hint:
+            result["provider"] = provider_hint
+
+        # Include how-to guidance per provider
+        guidance = {}
+        if provider_hint and "Event Hub" in provider_hint:
+            guidance = {
+                "title": "Azure Event Hubs — Where to find this",
+                "steps": [
+                    "Azure Portal → Event Hubs namespace → your Event Hub",
+                    "Settings → Shared access policies → click a policy (e.g. RootManageSharedAccessKey)",
+                    "Copy 'Connection string–primary key' — it includes Endpoint, SharedAccessKeyName, SharedAccessKey, and EntityPath",
+                    "Event Hubs expose a Kafka-compatible endpoint on port 9093 with SASL_SSL"
+                ]
+            }
+        elif provider_hint and "Kafka" in provider_hint:
+            guidance = {
+                "title": "Kafka / Confluent Cloud — Where to find this",
+                "steps": [
+                    "Confluent Cloud → your cluster → Cluster Settings → Bootstrap server",
+                    "Or: Confluent Cloud → Clients → select language → copy config snippet",
+                    "Self-managed: check server.properties or client.properties for bootstrap.servers",
+                    "Include security.protocol and sasl.mechanism if using SASL_SSL authentication"
+                ]
+            }
+        if guidance:
+            result["guidance"] = guidance
+
+        return result
+
+    except Exception as e:
+        return {"error": f"Section import failed: {str(e)}"}
 
 
 def create_streaming_task_sql(database: str, schema: str, task_name: str, table_name: str, 
