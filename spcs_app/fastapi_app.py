@@ -11478,51 +11478,60 @@ async def openflow_page():
                         + validateBtn;
 
                 case 'rest':
-                    return `<p style="color:#94a3b8;font-size:0.85rem;margin:0 0 16px;">Configure the REST API endpoint to poll.</p>`
+                    return `<p style="color:#94a3b8;font-size:0.85rem;margin:0 0 16px;">Configure <strong>InvokeHTTP</strong> to poll a REST API endpoint. Responses are routed through SplitJson if the API returns arrays.</p>`
                         + F('of_rest_url', 'API URL', 'https://api.example.com/v1/data')
                         + row2(
                             F('of_rest_method', 'HTTP Method', '', 'select', [['GET','GET'],['POST','POST']]),
-                            F('of_rest_auth', 'Authentication', '', 'select', [['none','None'],['bearer','Bearer Token'],['apikey','API Key'],['basic','Basic Auth']])
+                            F('of_rest_auth', 'Authentication', '', 'select', [['none','None'],['bearer','Bearer Token'],['apikey','API Key'],['basic','Basic Auth'],['oauth2','OAuth2 Token Refresh']])
                         )
                         + `<div id="of_rest_auth_fields"></div>`
                         + F('of_rest_headers', 'Custom Headers (JSON)', '{{"Accept": "application/json"}}', 'textarea')
-                        + F('of_rest_pagination', 'Pagination', '', 'select', [['none','None'],['offset','Offset/Limit'],['cursor','Cursor-based'],['link','Link Header']])
+                        + row2(
+                            F('of_rest_pagination', 'Pagination', '', 'select', [['none','None'],['offset','Offset/Limit'],['cursor','Cursor-based'],['link','Link Header']]),
+                            F('of_rest_schedule', 'Poll Interval (seconds)', '300')
+                        )
+                        + `<p style="color:#64748b;font-size:0.78rem;margin:0 0 12px;">Tip: For rate-limited APIs, add a ControlRate processor in the Transforms step to throttle throughput.</p>`
                         + validateBtn;
 
                 case 'cdc':
-                    return `<p style="color:#94a3b8;font-size:0.85rem;margin:0 0 16px;">Configure the source database for Change Data Capture replication.</p>`
-                        + F('of_cdc_dbtype', 'Database Type', '', 'select', [['postgres','PostgreSQL'],['mysql','MySQL'],['sqlserver','SQL Server']])
-                        + row2(
-                            F('of_cdc_host', 'Host', 'db.example.com'),
-                            F('of_cdc_port', 'Port', '5432')
-                        )
-                        + row2(
-                            F('of_cdc_database', 'Database', 'mydb'),
-                            F('of_cdc_schema', 'Schema', 'public')
-                        )
-                        + F('of_cdc_tables', 'Tables (comma-separated)', 'users, orders, products')
+                    return `<p style="color:#94a3b8;font-size:0.85rem;margin:0 0 16px;">Configure a <strong>CDC Connector</strong> (postgresql/mysql/sqlserver) for database replication.</p>
+                        <p style="color:#64748b;font-size:0.78rem;margin:0 0 12px;">Requires: replication enabled on source, JDBC driver uploaded, EAI for network access. See Snowflake docs for full prerequisites.</p>`
+                        + F('of_cdc_dbtype', 'Database Type', '', 'select', [['postgres','PostgreSQL (flow: postgresql)'],['mysql','MySQL (flow: mysql)'],['sqlserver','SQL Server (flow: sqlserver)']])
+                        + F('of_cdc_jdbc', 'JDBC Connection URL', 'jdbc:postgresql://host:5432/mydb')
                         + row2(
                             F('of_cdc_user', 'Username', 'replication_user'),
                             F('of_cdc_pass', 'Password', '', 'password')
                         )
+                        + F('of_cdc_tables', 'Included Tables (comma-separated or regex)', 'public.users, public.orders')
+                        + F('of_cdc_publication', 'Publication Name (PostgreSQL only)', 'my_publication')
+                        + F('of_cdc_case', 'Object Identifier Resolution', '', 'select', [['CASE_SENSITIVE','CASE_SENSITIVE (preserve source casing, requires quoted identifiers)'],['CASE_INSENSITIVE','CASE_INSENSITIVE (uppercase all names, Snowflake convention)']])
                         + validateBtn;
 
                 case 'files':
-                    return `<p style="color:#94a3b8;font-size:0.85rem;margin:0 0 16px;">Configure cloud storage source for file-based ingestion.</p>`
-                        + F('of_file_provider', 'Cloud Provider', '', 'select', [['s3','Amazon S3'],['gcs','Google Cloud Storage'],['azure','Azure Blob Storage']])
+                    return `<p style="color:#94a3b8;font-size:0.85rem;margin:0 0 16px;">Configure cloud storage source using the <strong>List + Fetch</strong> pattern (ListS3/ListGCSBucket + FetchS3Object/FetchGCSObject).</p>
+                        <p style="color:#64748b;font-size:0.78rem;margin:0 0 12px;">Files are listed, fetched, then parsed with ConvertRecord before loading to Snowflake. Check if a pre-built Connector exists before building custom.</p>`
+                        + F('of_file_provider', 'Cloud Provider', '', 'select', [['s3','Amazon S3 (ListS3 + FetchS3Object)'],['gcs','Google Cloud Storage (ListGCSBucket + FetchGCSObject)'],['azure','Azure Blob Storage']])
                         + F('of_file_bucket', 'Bucket / Container', 'my-data-bucket')
                         + F('of_file_prefix', 'Prefix (optional)', 'raw/events/')
-                        + F('of_file_format', 'File Format', '', 'select', [['json','JSON'],['csv','CSV'],['parquet','Parquet'],['avro','Avro']])
+                        + row2(
+                            F('of_file_format', 'File Format', '', 'select', [['json','JSON'],['csv','CSV'],['parquet','Parquet'],['avro','Avro']]),
+                            F('of_file_strategy', 'After Processing', '', 'select', [['none','Track only (no delete)'],['delete','Delete processed files'],['move','Move to archive prefix']])
+                        )
                         + validateBtn;
 
                 case 'datagen':
-                    return `<p style="color:#94a3b8;font-size:0.85rem;margin:0 0 16px;">Configure synthetic data generation using DataFaker expressions.</p>`
-                        + F('of_dg_schema', 'JSON Schema (DataFaker expressions)', `{{
-  "id": "${{Internet.uuid}}",
-  "timestamp": "${{TimeAndDate.past '5','SECONDS'}}",
-  "customer_id": "${{regexify 'CUST[0-9]{{6}}'}}",
-  "amount": ${{Number.randomDouble '2','10','9999'}},
-  "status": "${{Options.option 'active','pending','cancelled'}}"
+                    return `<p style="color:#94a3b8;font-size:0.85rem;margin:0 0 16px;">Configure synthetic data generation using <strong>GenerateJSON</strong> with JSON Schema and DataFaker format fields.</p>
+                        <p style="color:#64748b;font-size:0.78rem;margin:0 0 12px;">GenerateJSON uses standard JSON Schema with DataFaker expressions in the <code>format</code> field &mdash; NOT NiFi Expression Language <code>$&#123;...&#125;</code> syntax.</p>`
+                        + F('of_dg_schema', 'JSON Schema (DataFaker format fields)', `{{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {{
+    "id": {{"type": "string", "format": "Internet.uuid"}},
+    "timestamp": {{"type": "string", "format": "TimeAndDate.past '30','DAYS','yyyy-MM-dd\\'T\\'HH:mm:ss\\'Z\\''" }},
+    "customer_id": {{"type": "string", "format": "regexify 'CUST[0-9]{{6}}'"}},
+    "amount": {{"type": "number", "minimum": 10, "maximum": 9999}},
+    "status": {{"type": "string", "enum": ["active", "pending", "cancelled"]}}
+  }}
 }}`, 'textarea')
                         + row2(
                             F('of_dg_batch', 'Batch Size', '100'),
@@ -11723,8 +11732,8 @@ async def openflow_page():
 
             // Source processor
             const srcMap = {{
-                kafka: 'ConsumeKafka', rest: 'InvokeHTTP', cdc: 'CDC Source',
-                files: 'ListS3/FetchObject', datagen: 'GenerateJSON', custom: 'Custom Source'
+                kafka: 'ConsumeKafka', rest: 'InvokeHTTP', cdc: 'CDC Connector',
+                files: 'ListS3 + FetchS3Object', datagen: 'GenerateJSON', custom: 'Custom Source'
             }};
             processors.push(chip(srcMap[tpl] || 'Source', '245,158,11'));
 
@@ -11847,69 +11856,95 @@ async def openflow_generate(request: Request):
         eai_hosts = body.get("eai_hosts", "")
         network_rule = body.get("network_rule", "OPENFLOW_NETWORK_RULE")
         secret_name = body.get("secret_name", "")
+        runtime_role = body.get("runtime_role", "<OPENFLOW_RUNTIME_ROLE>")
 
         sql_parts = []
+        sql_parts.append(f"-- =============================================================")
         sql_parts.append(f"-- Openflow Pipeline Deployment SQL")
         sql_parts.append(f"-- Template: {template}")
-        sql_parts.append(f"-- Generated by FLUX Data Forge\n")
+        sql_parts.append(f"-- Generated by FLUX Data Forge")
+        sql_parts.append(f"-- =============================================================\n")
 
-        # 1. Network rule (if hosts provided)
+        # 1. Network rule + EAI (requires SECURITYADMIN per platform-eai.md)
         if eai_hosts.strip():
-            hosts_list = ", ".join(f"'{h.strip()}'" for h in eai_hosts.split(",") if h.strip())
-            sql_parts.append(f"-- Step 1: Create Network Rule")
+            # Validate and format host:port entries
+            raw_hosts = [h.strip() for h in eai_hosts.split(",") if h.strip()]
+            hosts_list = ", ".join(f"'{h}'" for h in raw_hosts)
+
+            sql_parts.append(f"-- Step 1: Network Rule & External Access Integration")
+            sql_parts.append(f"-- NOTE: Network rules and EAI require SECURITYADMIN role.")
+            sql_parts.append(f"-- Ensure hosts use host:port format (e.g. broker1:9092, api.example.com:443).\n")
+            sql_parts.append(f"USE ROLE SECURITYADMIN;\n")
+
             sql_parts.append(f"CREATE OR REPLACE NETWORK RULE {dest_db}.{dest_schema}.{network_rule}")
             sql_parts.append(f"  MODE = EGRESS")
             sql_parts.append(f"  TYPE = HOST_PORT")
-            sql_parts.append(f"  VALUE_LIST = ({hosts_list});\n")
+            sql_parts.append(f"  VALUE_LIST = ({hosts_list});")
+            sql_parts.append(f"")
+            sql_parts.append(f"-- Verify network rule was created correctly:")
+            sql_parts.append(f"DESCRIBE NETWORK RULE {dest_db}.{dest_schema}.{network_rule};\n")
 
         # 2. Secret (if provided)
         if secret_name.strip():
-            sql_parts.append(f"-- Step 2: Create Secret (update credentials)")
+            sql_parts.append(f"-- Step 2: Create Secret (update credentials as needed)")
             sql_parts.append(f"CREATE OR REPLACE SECRET {dest_db}.{dest_schema}.{secret_name}")
             sql_parts.append(f"  TYPE = GENERIC_STRING")
             sql_parts.append(f"  SECRET_STRING = '<UPDATE_WITH_ACTUAL_SECRET>';\n")
 
         # 3. External Access Integration
         if eai_hosts.strip():
-            sql_parts.append(f"-- Step 3: Create External Access Integration")
-            sql_parts.append(f"CREATE OR REPLACE EXTERNAL ACCESS INTEGRATION {eai_name}")
-            sql_parts.append(f"  ALLOWED_NETWORK_RULES = ({dest_db}.{dest_schema}.{network_rule})")
+            eai_secrets_clause = ""
             if secret_name.strip():
-                sql_parts.append(f"  ALLOWED_AUTHENTICATION_SECRETS = ({dest_db}.{dest_schema}.{secret_name})")
-            sql_parts.append(f"  ENABLED = TRUE;\n")
+                eai_secrets_clause = f"\n  ALLOWED_AUTHENTICATION_SECRETS = ({dest_db}.{dest_schema}.{secret_name})"
+            sql_parts.append(f"CREATE OR REPLACE EXTERNAL ACCESS INTEGRATION {eai_name}")
+            sql_parts.append(f"  ALLOWED_NETWORK_RULES = ({dest_db}.{dest_schema}.{network_rule}){eai_secrets_clause}")
+            sql_parts.append(f"  ENABLED = TRUE")
+            sql_parts.append(f"  COMMENT = 'Openflow EAI for {template} pipeline - generated by FLUX Data Forge';")
+            sql_parts.append(f"")
+            sql_parts.append(f"-- Verify EAI was created correctly:")
+            sql_parts.append(f"DESCRIBE EXTERNAL ACCESS INTEGRATION {eai_name};")
+            sql_parts.append(f"")
+            sql_parts.append(f"-- Grant EAI usage to Openflow runtime role:")
+            sql_parts.append(f"GRANT USAGE ON INTEGRATION {eai_name} TO ROLE {runtime_role};\n")
+            sql_parts.append(f"-- IMPORTANT: After running these statements, attach the EAI to")
+            sql_parts.append(f"-- the Openflow runtime via the Snowflake UI (Openflow > Settings).\n")
 
-        # 4. Destination table
-        sql_parts.append(f"-- Step 4: Create destination table (if needed)")
+        # 4. Destination table & grants (switch back to a role with DDL privileges)
+        sql_parts.append(f"-- Step 3: Create destination table and grant permissions")
+        sql_parts.append(f"-- Switch to a role with CREATE TABLE privileges on the target schema.\n")
+        sql_parts.append(f"USE ROLE SYSADMIN;  -- Or your preferred DDL role\n")
         sql_parts.append(f"CREATE TABLE IF NOT EXISTS {dest_db}.{dest_schema}.{dest_table} (")
         sql_parts.append(f"  RECORD_CONTENT VARIANT,")
         sql_parts.append(f"  RECORD_METADATA VARIANT,")
         sql_parts.append(f"  _INGESTED_AT TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()")
         sql_parts.append(f");\n")
 
-        # 5. Grants
-        sql_parts.append(f"-- Step 5: Grant permissions to Openflow service role")
-        sql_parts.append(f"GRANT USAGE ON DATABASE {dest_db} TO ROLE OPENFLOW_SVC_ROLE;")
-        sql_parts.append(f"GRANT USAGE ON SCHEMA {dest_db}.{dest_schema} TO ROLE OPENFLOW_SVC_ROLE;")
-        sql_parts.append(f"GRANT INSERT, SELECT ON TABLE {dest_db}.{dest_schema}.{dest_table} TO ROLE OPENFLOW_SVC_ROLE;")
-        if eai_hosts.strip():
-            sql_parts.append(f"GRANT USAGE ON INTEGRATION {eai_name} TO ROLE OPENFLOW_SVC_ROLE;")
+        # 5. Grants — per author-snowflake-destination.md
+        sql_parts.append(f"-- Step 4: Grant permissions to Openflow runtime role")
+        sql_parts.append(f"-- These are the minimum privileges required per Snowflake documentation.\n")
+        sql_parts.append(f"GRANT USAGE ON DATABASE {dest_db} TO ROLE {runtime_role};")
+        sql_parts.append(f"GRANT USAGE ON SCHEMA {dest_db}.{dest_schema} TO ROLE {runtime_role};")
+        sql_parts.append(f"GRANT CREATE TABLE ON SCHEMA {dest_db}.{dest_schema} TO ROLE {runtime_role};")
+        sql_parts.append(f"GRANT INSERT, SELECT ON TABLE {dest_db}.{dest_schema}.{dest_table} TO ROLE {runtime_role};")
         sql_parts.append("")
 
         # 6. Processor config hints as comments
         src_map = {
-            "kafka": "ConsumeKafka_2_6 → bootstrap.servers, topic, group.id, security.protocol",
-            "rest": "InvokeHTTP → Remote URL, HTTP Method, Request Headers",
-            "cdc": "CDC Source Connector → database.hostname, database.port, database.dbname, table.include.list",
-            "files": "ListS3 + FetchS3Object → Bucket, Prefix, Region",
-            "datagen": "GenerateJSON (DataFaker) → JSON Schema, Batch Size, Schedule",
+            "kafka": "ConsumeKafka_2_6 -> bootstrap.servers, topic, group.id, security.protocol",
+            "rest": "InvokeHTTP -> Remote URL, HTTP Method, Request Headers",
+            "cdc": "CDC Connector (postgresql/mysql/sqlserver) -> connection URL, credentials, table.include.list",
+            "files": "ListS3 + FetchS3Object -> Bucket, Prefix, Region (or ListGCSBucket + FetchGCSObject)",
+            "datagen": "GenerateJSON -> JSON Schema with DataFaker format fields, Batch Size, Schedule",
             "custom": "Configure processors manually in the Openflow UI",
         }
-        sql_parts.append(f"-- Step 6: Openflow Processor Configuration Reference")
+        sql_parts.append(f"-- =============================================================")
+        sql_parts.append(f"-- Openflow Processor Configuration Reference")
+        sql_parts.append(f"-- =============================================================")
         sql_parts.append(f"-- Source: {src_map.get(template, 'Custom')}")
 
         if transforms:
             transform_map = {
-                "convert": "ConvertRecord (JsonTreeReader → JsonRecordSetWriter or AvroRecordSetWriter)",
+                "convert": "ConvertRecord (JsonTreeReader -> JsonRecordSetWriter or AvroRecordSetWriter)",
                 "jolt": "JoltTransformJSON (shift/default/remove specs)",
                 "filter": "RouteOnAttribute (expression-based filtering)",
                 "enrich": "UpdateAttribute (add timestamp, static fields, computed values)",
@@ -11918,8 +11953,14 @@ async def openflow_generate(request: Request):
                 sql_parts.append(f"-- Transform: {transform_map.get(t, t)}")
 
         dest_proc = "UpdateSnowflakeDatabase" if dest_method == "update_db" else "PutSnowpipeStreaming"
-        sql_parts.append(f"-- Destination: {dest_proc} → {dest_db}.{dest_schema}.{dest_table}")
-        sql_parts.append(f"\n-- Deploy these SQL statements, then configure the processors in the Openflow UI.")
+        sql_parts.append(f"-- Destination: {dest_proc} -> {dest_db}.{dest_schema}.{dest_table}")
+        sql_parts.append(f"--")
+        sql_parts.append(f"-- Next steps:")
+        sql_parts.append(f"--   1. Run this SQL in Snowflake (Snowsight or SnowSQL)")
+        sql_parts.append(f"--   2. In the Openflow UI, deploy or create a flow")
+        sql_parts.append(f"--   3. Configure processor properties using the parameter context")
+        sql_parts.append(f"--   4. Attach the EAI in Openflow > Settings (if applicable)")
+        sql_parts.append(f"--   5. Verify controllers, then start the flow")
 
         sql = "\n".join(sql_parts)
         return {"sql": sql}
