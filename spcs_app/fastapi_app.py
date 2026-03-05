@@ -3014,6 +3014,12 @@ def get_material_icon(name: str, size: str = "24px", color: str = "#e2e8f0") -> 
     return f'<span class="material-symbols-outlined" style="font-size:{size};color:{color};vertical-align:middle;">{name}</span>'
 
 
+def get_openflow_icon(size: str = "24px", color: str = "#4AC1E0") -> str:
+    """Return an inline SVG of the Openflow logo (hub-and-spoke flow design).
+    Pixel-perfect potrace vectorization of OpenflowLogoBlueTransparent.png."""
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 276 262" width="{size}" height="{size}" style="vertical-align:middle;display:inline-block;" preserveAspectRatio="xMidYMid meet"><g transform="translate(0,262) scale(0.1,-0.1)" fill="{color}" stroke="none"><path d="M571 2448 c-84 -15 -159 -78 -190 -161 -6 -16 -11 -52 -11 -81 0 -102 73 -189 187 -222 68 -20 146 -8 205 31 21 14 46 25 55 25 10 0 82 -34 161 -74 l143 -74 75 51 c64 44 73 53 59 63 -16 12 -236 128 -330 174 -48 24 -50 27 -57 74 -18 127 -158 219 -297 194z m115 -114 c45 -22 74 -70 74 -126 0 -130 -192 -178 -260 -65 -42 68 -17 156 53 188 52 23 89 24 133 3z M2086 2448 c-93 -13 -179 -99 -192 -189 l-6 -46 -137 -62 c-480 -215 -804 -474 -900 -718 l-19 -48 -111 -3 c-71 -2 -111 1 -111 8 0 5 -17 29 -38 52 -158 175 -443 74 -443 -158 0 -155 180 -274 334 -220 51 19 103 60 133 107 l24 39 100 0 c94 0 100 -1 100 -20 0 -41 43 -146 85 -210 24 -36 75 -96 114 -133 l71 -69 59 33 c111 61 110 57 40 114 -133 109 -209 254 -194 370 26 215 322 468 805 689 138 64 156 70 165 56 3 -6 30 -22 58 -37 166 -85 368 33 367 214 -1 82 -56 170 -132 209 -42 22 -114 31 -172 22z m123 -116 c62 -33 89 -119 57 -181 -46 -87 -195 -93 -246 -9 -28 45 -27 117 2 153 42 54 125 70 187 37z m-1754 -926 c56 -37 80 -118 51 -175 -25 -46 -71 -71 -135 -71 -49 0 -57 3 -92 39 -38 38 -45 60 -40 120 8 86 137 138 216 87z M1508 1729 c-38 -22 -68 -43 -68 -46 0 -3 38 -45 84 -94 61 -64 95 -110 123 -166 36 -72 38 -83 38 -167 0 -81 -3 -98 -29 -149 -91 -179 -349 -362 -751 -533 -97 -41 -101 -42 -120 -24 -65 59 -179 76 -263 40 -56 -24 -116 -83 -138 -136 -19 -46 -17 -131 5 -179 23 -52 85 -107 144 -130 55 -21 155 -17 203 8 66 34 120 107 132 179 l7 40 120 52 c343 147 613 324 736 482 76 98 111 169 133 275 l6 27 134 1 135 2 15 -30 c22 -42 91 -97 144 -115 101 -35 206 -6 275 74 47 55 60 97 55 174 -3 51 -10 70 -38 109 -67 94 -213 135 -315 88 -43 -19 -111 -84 -121 -113 -5 -16 -20 -18 -155 -18 -129 0 -149 2 -149 16 0 21 -65 150 -98 194 -30 41 -163 180 -171 180 -3 0 -36 -18 -73 -41z m932 -315 c51 -20 80 -66 80 -126 0 -78 -58 -128 -148 -128 -141 0 -184 187 -57 250 48 24 72 25 125 4z m-1717 -953 c24 -24 31 -40 35 -84 4 -49 2 -57 -28 -90 -86 -98 -236 -54 -248 72 -3 37 0 58 12 76 51 77 165 90 229 26z M1549 597 l-77 -53 105 -47 c57 -26 145 -64 196 -84 51 -20 97 -40 103 -45 6 -4 14 -26 17 -47 13 -100 131 -191 246 -191 101 0 188 57 230 150 99 219 -175 424 -379 284 l-51 -35 -72 27 c-40 15 -105 42 -146 61 -40 18 -79 33 -85 33 -6 0 -45 -24 -87 -53z m669 -114 c69 -43 82 -152 24 -204 -41 -37 -96 -52 -142 -39 -74 21 -105 70 -101 157 1 12 15 38 31 57 47 53 130 66 188 29z"/></g></svg>'''
+
+
 def format_number(n):
     if n >= 1_000_000_000:
         return f"{n/1_000_000_000:.1f}B"
@@ -4706,12 +4712,16 @@ def get_tabs_html(active_tab: str):
         ('monitor', 'monitoring', 'Monitor'),
         ('validate', 'check_circle', 'Validate'),
         ('history', 'history', 'History'),
-        ('openflow', 'account_tree', 'Openflow'),
+        ('openflow', None, 'Openflow'),
     ]
     html = '<div class="tabs">'
     for tab_id, icon, label in tabs:
         active = 'active' if tab_id == active_tab else ''
-        html += f'<a href="/{tab_id}" class="tab {active}">{get_material_icon(icon, "20px")} {label}</a>'
+        if tab_id == 'openflow':
+            icon_html = get_openflow_icon("20px", "#e2e8f0" if active_tab != 'openflow' else "#4AC1E0")
+        else:
+            icon_html = get_material_icon(icon, "20px")
+        html += f'<a href="/{tab_id}" class="tab {active}">{icon_html} {label}</a>'
     html += '</div>'
     return html
 
