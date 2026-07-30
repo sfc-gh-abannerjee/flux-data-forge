@@ -4343,7 +4343,7 @@ def _get_connection_modal_html():
 
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
             <label style="font-size:0.78rem;color:var(--color-text-muted);font-weight:500;">Account
-              <input name="account" id="conn-account" required placeholder="e.g. GZB42423" style="
+              <input name="account" id="conn-account" required placeholder="e.g. myorg-myaccount" style="
                 width:100%;margin-top:4px;padding:10px 12px;background:var(--color-bg-primary);
                 border:1px solid var(--color-border);border-radius:var(--radius-sm);
                 color:var(--color-text-primary);font-size:0.88rem;box-sizing:border-box;

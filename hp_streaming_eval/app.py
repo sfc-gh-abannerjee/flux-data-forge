@@ -1496,7 +1496,7 @@ CMD ["python", "eventhub_to_snowflake.py"]
 # ============================================================
 # docker build -t eh-snowflake-bridge .
 # docker run -d --name eh-bridge \
-#   -e SNOWFLAKE_ACCOUNT="GZB42423" \
+#   -e SNOWFLAKE_ACCOUNT="myorg-myaccount" \
 #   -e SNOWFLAKE_USER="MY_USER" \
 #   -e EVENTHUB_CONN_STR="Endpoint=sb://..." \
 #   -e EVENTHUB_NAME="my-hub" \

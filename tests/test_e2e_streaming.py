@@ -11,7 +11,7 @@ Requires:
     - snowpipe-streaming SDK installed (pip install snowpipe-streaming)
     - RSA private key at the path specified below
     - FLUX_DB.STREAMING_TEST schema, table, and PIPE already created
-    - cpe_demo_CLI Snowflake connection configured
+    - se_demo Snowflake connection configured
 """
 
 import sys
